@@ -7,12 +7,12 @@ import type { AppSettings, IndexStats, TabId } from "./shared/types";
 
 const DEFAULT_SETTINGS: AppSettings = {
   data_path: "",
-  map_provider: "osm",
+  map_provider: "yandex",
   yandex_api_key: "",
   dgis_api_key: "",
-  default_city: "Москва",
-  default_lat: 55.7558,
-  default_lon: 37.6173,
+  default_city: "Кемерово",
+  default_lat: 55.3549,
+  default_lon: 86.0885,
   default_zoom: 12,
 };
 
@@ -22,6 +22,7 @@ export default function App() {
   const [stats, setStats] = useState<IndexStats | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [openCardId, setOpenCardId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -93,8 +94,16 @@ export default function App() {
       {error && <div className="status-banner">{error}</div>}
 
       <main className="main">
-        {tab === "map" && <MapPage settings={settings} />}
-        {tab === "cards" && <CardsPage />}
+        {tab === "map" && (
+          <MapPage
+            settings={settings}
+            onOpenCard={(id) => {
+              setOpenCardId(id);
+              setTab("cards");
+            }}
+          />
+        )}
+        {tab === "cards" && <CardsPage initialCardId={openCardId} />}
         {tab === "settings" && (
           <SettingsPage
             settings={settings}

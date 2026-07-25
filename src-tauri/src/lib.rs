@@ -375,7 +375,56 @@ fn get_favorites(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<SearchHit
 
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
-    open::that(&path).map_err(|e| format!("open failed: {e}"))
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("Файл не найден (облако не скачало?): {path}"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        // `start` correctly uses file associations (Word/Visio/etc.)
+        Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .spawn()
+            .map_err(|e| format!("не удалось открыть: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        open::that(&path).map_err(|e| format!("open failed: {e}"))
+    }
+}
+
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    let folder = if p.is_file() {
+        p.parent()
+            .map(|x| x.to_path_buf())
+            .unwrap_or_else(|| p.clone())
+    } else {
+        p
+    };
+    if !folder.exists() {
+        return Err(format!("Папка не найдена: {}", folder.display()));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        Command::new("explorer")
+            .arg(folder.as_os_str())
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|e| format!("explorer: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        open::that(folder).map_err(|e| format!("open folder: {e}"))
+    }
 }
 
 #[tauri::command]
@@ -431,6 +480,7 @@ pub fn run() {
             toggle_favorite,
             get_favorites,
             open_path,
+            open_folder,
             read_file_base64,
             pick_data_folder
         ])

@@ -217,10 +217,37 @@ button {
   min-height: 0;
 }
 
-.map-pane .leaflet-container {
+.map-pane .leaflet-container,
+.provider-map {
   width: 100%;
   height: 100%;
   background: #12161a;
+}
+
+.map-missing-key {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 1.5rem;
+}
+
+.doc-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.doc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
 }
 
 .detail h2 {

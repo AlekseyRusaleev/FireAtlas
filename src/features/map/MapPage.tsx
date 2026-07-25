@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { MapContainer, TileLayer, Marker, Popup, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
@@ -15,8 +15,9 @@ import {
   type WaterPoint,
   type WaterType,
 } from "../../shared/types";
+import { YandexMapView } from "./YandexMapView";
+import { DgisMapView } from "./DgisMapView";
 
-// Fix default Leaflet marker paths in Vite
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: markerIcon2x,
   iconUrl: markerIcon,
@@ -50,11 +51,11 @@ function makeIcon(type: WaterType) {
   });
 }
 
-function FlyTo({ center, zoom }: { center: [number, number]; zoom?: number }) {
+function FlyTo({ center }: { center: [number, number] }) {
   const map = useMap();
   useEffect(() => {
-    map.flyTo(center, zoom ?? Math.max(map.getZoom(), 15), { duration: 0.6 });
-  }, [center, zoom, map]);
+    map.flyTo(center, Math.max(map.getZoom(), 15), { duration: 0.6 });
+  }, [center, map]);
   return null;
 }
 
@@ -96,9 +97,10 @@ function BoundsLoader({
 
 interface Props {
   settings: AppSettings;
+  onOpenCard: (cardId: number) => void;
 }
 
-export function MapPage({ settings }: Props) {
+export function MapPage({ settings, onOpenCard }: Props) {
   const [query, setQuery] = useState("");
   const [types, setTypes] = useState<WaterType[]>([...ALL_TYPES]);
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -116,6 +118,7 @@ export function MapPage({ settings }: Props) {
   const [sideMode, setSideMode] = useState<"search" | "history" | "favorites">("search");
 
   const enabled = useMemo(() => new Set(types), [types]);
+  const provider = settings.map_provider || "yandex";
 
   async function refreshLists() {
     const [h, f] = await Promise.all([api.getHistory(15), api.getFavorites()]);
@@ -126,6 +129,10 @@ export function MapPage({ settings }: Props) {
   useEffect(() => {
     void refreshLists();
   }, []);
+
+  useEffect(() => {
+    setCenter([settings.default_lat, settings.default_lon]);
+  }, [settings.default_lat, settings.default_lon]);
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -140,6 +147,14 @@ export function MapPage({ settings }: Props) {
     }, 180);
     return () => window.clearTimeout(t);
   }, [query, types]);
+
+  const loadBounds = useCallback(
+    async (b: { south: number; west: number; north: number; east: number }) => {
+      const pts = await api.getWaterInBounds(b.south, b.west, b.north, b.east, types);
+      setPoints(pts);
+    },
+    [types]
+  );
 
   async function selectHit(hit: SearchHit) {
     setSelected(hit);
@@ -167,6 +182,19 @@ export function MapPage({ settings }: Props) {
 
   function toggleType(t: WaterType) {
     setTypes((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
+  }
+
+  function onPointClick(p: WaterPoint) {
+    void selectHit({
+      id: p.id,
+      kind: "water",
+      title: p.name,
+      subtitle: p.address || `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`,
+      water_type: p.water_type,
+      address: p.address,
+      lat: p.lat,
+      lon: p.lon,
+    });
   }
 
   return (
@@ -214,11 +242,7 @@ export function MapPage({ settings }: Props) {
         <div className="filters">
           {ALL_TYPES.map((t) => (
             <label key={t}>
-              <input
-                type="checkbox"
-                checked={enabled.has(t)}
-                onChange={() => toggleType(t)}
-              />
+              <input type="checkbox" checked={enabled.has(t)} onChange={() => toggleType(t)} />
               {WATER_TYPE_LABELS[t]}
             </label>
           ))}
@@ -260,47 +284,57 @@ export function MapPage({ settings }: Props) {
       </aside>
 
       <div className="map-pane">
-        <MapContainer
-          center={[settings.default_lat, settings.default_lon]}
-          zoom={settings.default_zoom}
-          zoomControl
-          style={{ width: "100%", height: "100%" }}
-        >
-          <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        {provider === "yandex" && (
+          <YandexMapView
+            apiKey={settings.yandex_api_key}
+            center={center}
+            zoom={settings.default_zoom}
+            points={points}
+            focusId={focusId}
+            onBoundsChange={(b) => void loadBounds(b)}
+            onPointClick={onPointClick}
           />
-          <FlyTo center={center} />
-          <BoundsLoader types={types} onPoints={setPoints} />
-          {points.map((p) => (
-            <Marker
-              key={p.id}
-              position={[p.lat, p.lon]}
-              icon={makeIcon(p.water_type)}
-              opacity={focusId === p.id ? 1 : 0.9}
-              eventHandlers={{
-                click: () => {
-                  void selectHit({
-                    id: p.id,
-                    kind: "water",
-                    title: p.name,
-                    subtitle: p.address || `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`,
-                    water_type: p.water_type,
-                    address: p.address,
-                    lat: p.lat,
-                    lon: p.lon,
-                  });
-                },
-              }}
-            >
-              <Popup>
-                <strong>{p.name}</strong>
-                <br />
-                {WATER_TYPE_SHORT[p.water_type]}
-              </Popup>
-            </Marker>
-          ))}
-        </MapContainer>
+        )}
+        {provider === "dgis" && (
+          <DgisMapView
+            apiKey={settings.dgis_api_key}
+            center={center}
+            zoom={settings.default_zoom}
+            points={points}
+            focusId={focusId}
+            onBoundsChange={(b) => void loadBounds(b)}
+            onPointClick={onPointClick}
+          />
+        )}
+        {provider === "osm" && (
+          <MapContainer
+            center={[settings.default_lat, settings.default_lon]}
+            zoom={settings.default_zoom}
+            zoomControl
+            style={{ width: "100%", height: "100%" }}
+          >
+            <TileLayer
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+            <FlyTo center={center} />
+            <BoundsLoader types={types} onPoints={setPoints} />
+            {points.map((p) => (
+              <Marker
+                key={p.id}
+                position={[p.lat, p.lon]}
+                icon={makeIcon(p.water_type)}
+                eventHandlers={{ click: () => onPointClick(p) }}
+              >
+                <Popup>
+                  <strong>{p.name}</strong>
+                  <br />
+                  {WATER_TYPE_SHORT[p.water_type]}
+                </Popup>
+              </Marker>
+            ))}
+          </MapContainer>
+        )}
       </div>
 
       <aside className="detail">
@@ -341,8 +375,8 @@ export function MapPage({ settings }: Props) {
 
             <div className="actions">
               {selected.kind === "card" && (
-                <button className="btn primary" disabled>
-                  Открыть карточку (раздел «Карточки»)
+                <button className="btn primary" onClick={() => onOpenCard(selected.id)}>
+                  Открыть карточку
                 </button>
               )}
               <button
@@ -357,10 +391,7 @@ export function MapPage({ settings }: Props) {
                 В избранное
               </button>
               {water && (
-                <button
-                  className="btn"
-                  onClick={() => setCenter([water.lat, water.lon])}
-                >
+                <button className="btn" onClick={() => setCenter([water.lat, water.lon])}>
                   Показать на карте
                 </button>
               )}
@@ -368,17 +399,31 @@ export function MapPage({ settings }: Props) {
 
             <div>
               <h3 style={{ margin: "0.5rem 0" }}>Ближайшие водоисточники</h3>
-              {nearby.length === 0 && (
-                <div className="muted">Нет данных поблизости</div>
-              )}
+              {nearby.length === 0 && <div className="muted">Нет данных поблизости</div>}
               <div className="nearby-list">
                 {nearby.map((n) => (
-                  <div key={n.id} className="nearby-item">
+                  <button
+                    key={n.id}
+                    type="button"
+                    className="nearby-item"
+                    style={{ width: "100%", cursor: "pointer", textAlign: "left" }}
+                    onClick={() =>
+                      void selectHit({
+                        id: n.id,
+                        kind: "water",
+                        title: n.name,
+                        subtitle: `${Math.round(n.distance_m)} м`,
+                        water_type: n.water_type,
+                        lat: n.lat,
+                        lon: n.lon,
+                      })
+                    }
+                  >
                     <strong>
                       {WATER_TYPE_SHORT[n.water_type]} · {n.name}
                     </strong>
                     <div className="muted">{Math.round(n.distance_m)} м</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>

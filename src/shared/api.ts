@@ -95,6 +95,10 @@ export async function openPath(path: string): Promise<void> {
   return invoke("open_path", { path });
 }
 
+export async function openFolder(path: string): Promise<void> {
+  return invoke("open_folder", { path });
+}
+
 export async function readFileBase64(path: string): Promise<string> {
   return invoke("read_file_base64", { path });
 }

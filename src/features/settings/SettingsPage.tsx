@@ -232,13 +232,14 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
               setForm({ ...form, map_provider: e.target.value as MapProviderId })
             }
           >
-            <option value="osm">OpenStreetMap (работает сейчас, без ключа)</option>
-            <option value="yandex">Яндекс (нужен ключ)</option>
+            <option value="yandex">Яндекс.Карты (нужен ключ)</option>
             <option value="dgis">2ГИС (нужен ключ)</option>
+            <option value="osm">OpenStreetMap (без ключа, запасной)</option>
           </select>
           <div className="muted">
-            Ключ Яндекс/2ГИС — только для их карты и поиска адреса. KMZ и карточки работают без
-            ключа.
+            Для Яндекса: ключ с developer.tech.yandex.ru (JavaScript API и HTTP Геокодер). Для
+            2ГИС: platform.2gis.ru. Без ключа карта не загрузится — переключитесь на OSM
+            временно.
           </div>
         </div>
 

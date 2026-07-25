@@ -23,16 +23,16 @@ pub struct AppSettings {
 }
 
 fn default_provider() -> String {
-    "osm".into()
+    "yandex".into()
 }
 fn default_city() -> String {
-    "Москва".into()
+    "Кемерово".into()
 }
 fn default_lat() -> f64 {
-    55.7558
+    55.3549
 }
 fn default_lon() -> f64 {
-    37.6173
+    86.0885
 }
 fn default_zoom() -> u32 {
     12
