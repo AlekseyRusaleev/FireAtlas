@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Демо водоисточники</name>
+    <Folder>
+      <name>Гидранты</name>
+      <Placemark>
+        <name>Гидрант №12</name>
+        <description>ул. Ленина, 25</description>
+        <address>ул. Ленина, 25</address>
+        <Point><coordinates>37.620000,55.754000,0</coordinates></Point>
+      </Placemark>
+      <Placemark>
+        <name>Гидрант №24</name>
+        <description>ул. Ленина, 45</description>
+        <address>ул. Ленина, 45</address>
+        <Point><coordinates>37.625000,55.756000,0</coordinates></Point>
+      </Placemark>
+    </Folder>
+    <Folder>
+      <name>Водоёмы</name>
+      <Placemark>
+        <name>Пожарный водоём №3</name>
+        <description>парк у школы</description>
+        <Point><coordinates>37.630000,55.750000,0</coordinates></Point>
+      </Placemark>
+    </Folder>
+    <Folder>
+      <name>Башни</name>
+      <Placemark>
+        <name>Водонапорная башня</name>
+        <Point><coordinates>37.610000,55.748000,0</coordinates></Point>
+      </Placemark>
+    </Folder>
+    <Folder>
+      <name>Пирсы</name>
+      <Placemark>
+        <name>Пирс №1</name>
+        <Point><coordinates>37.640000,55.760000,0</coordinates></Point>
+      </Placemark>
+    </Folder>
+  </Document>
+</kml>
