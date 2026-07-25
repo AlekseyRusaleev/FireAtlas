@@ -4,6 +4,7 @@ import type {
   Card,
   IndexStats,
   NearbyPoint,
+  ReindexReport,
   SearchHit,
   WaterPoint,
   WaterType,
@@ -21,8 +22,12 @@ export async function getStats(): Promise<IndexStats> {
   return invoke("get_stats");
 }
 
-export async function reindex(): Promise<IndexStats> {
+export async function reindex(): Promise<ReindexReport> {
   return invoke("reindex");
+}
+
+export async function importKmzFiles(): Promise<ReindexReport> {
+  return invoke("import_kmz_files");
 }
 
 export async function search(

@@ -4,26 +4,51 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default)]
     pub data_path: String,
+    #[serde(default = "default_provider")]
     pub map_provider: String,
+    #[serde(default)]
     pub yandex_api_key: String,
+    #[serde(default)]
     pub dgis_api_key: String,
+    #[serde(default = "default_city")]
+    pub default_city: String,
+    #[serde(default = "default_lat")]
     pub default_lat: f64,
+    #[serde(default = "default_lon")]
     pub default_lon: f64,
+    #[serde(default = "default_zoom")]
     pub default_zoom: u32,
+}
+
+fn default_provider() -> String {
+    "osm".into()
+}
+fn default_city() -> String {
+    "Москва".into()
+}
+fn default_lat() -> f64 {
+    55.7558
+}
+fn default_lon() -> f64 {
+    37.6173
+}
+fn default_zoom() -> u32 {
+    12
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             data_path: String::new(),
-            // UI currently renders OSM; yandex preferred when key is set later
-            map_provider: "yandex".into(),
+            map_provider: default_provider(),
             yandex_api_key: String::new(),
             dgis_api_key: String::new(),
-            default_lat: 55.75,
-            default_lon: 37.62,
-            default_zoom: 11,
+            default_city: default_city(),
+            default_lat: default_lat(),
+            default_lon: default_lon(),
+            default_zoom: default_zoom(),
         }
     }
 }

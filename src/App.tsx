@@ -7,12 +7,13 @@ import type { AppSettings, IndexStats, TabId } from "./shared/types";
 
 const DEFAULT_SETTINGS: AppSettings = {
   data_path: "",
-  map_provider: "yandex",
+  map_provider: "osm",
   yandex_api_key: "",
   dgis_api_key: "",
-  default_lat: 55.75,
-  default_lon: 37.62,
-  default_zoom: 11,
+  default_city: "Москва",
+  default_lat: 55.7558,
+  default_lon: 37.6173,
+  default_zoom: 12,
 };
 
 export default function App() {

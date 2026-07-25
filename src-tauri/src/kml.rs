@@ -163,11 +163,22 @@ pub fn parse_kmz_file(path: &Path) -> Result<Vec<KmlPlacemark>, String> {
 }
 
 fn parse_first_coordinate(raw: &str) -> Option<(f64, f64)> {
-    let first = raw.split_whitespace().next()?;
-    let mut parts = first.split(',');
-    let lon: f64 = parts.next()?.trim().parse().ok()?;
-    let lat: f64 = parts.next()?.trim().parse().ok()?;
-    Some((lon, lat))
+    // KML standard: lon,lat[,alt]
+    for token in raw.split_whitespace() {
+        let mut parts = token.split(',');
+        let lon: f64 = match parts.next()?.trim().parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let lat: f64 = match parts.next()?.trim().parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat) {
+            return Some((lon, lat));
+        }
+    }
+    None
 }
 
 fn non_empty(s: &str) -> Option<String> {

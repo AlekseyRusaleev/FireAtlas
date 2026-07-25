@@ -23,7 +23,7 @@ L.Icon.Default.mergeOptions({
   shadowUrl: markerShadow,
 });
 
-const ALL_TYPES: WaterType[] = ["hydrant", "pond", "tower", "pier"];
+const ALL_TYPES: WaterType[] = ["hydrant", "pond", "tower", "pier", "other"];
 
 function typeColor(t: WaterType): string {
   switch (t) {

@@ -40,18 +40,32 @@ impl WaterType {
 
     pub fn from_str_loose(s: &str) -> Self {
         let t = s.to_lowercase();
-        if t.contains("гидрант") || t.contains("hydrant") || t.contains("пг") {
+        if t.contains("гидрант")
+            || t.contains("hydrant")
+            || t.contains("пг")
+            || t.contains("пожарный гидрант")
+        {
             WaterType::Hydrant
         } else if t.contains("водоем")
             || t.contains("водоём")
             || t.contains("пруд")
             || t.contains("pond")
             || t.contains("озеро")
+            || t.contains("водоист")
+            || t.contains("открыт")
         {
             WaterType::Pond
-        } else if t.contains("башн") || t.contains("tower") || t.contains("водонапор") {
+        } else if t.contains("башн")
+            || t.contains("tower")
+            || t.contains("водонапор")
+            || t.contains("вб")
+        {
             WaterType::Tower
-        } else if t.contains("пирс") || t.contains("pier") || t.contains("причал") {
+        } else if t.contains("пирс")
+            || t.contains("pier")
+            || t.contains("причал")
+            || t.contains("набер")
+        {
             WaterType::Pier
         } else {
             WaterType::Other
@@ -65,6 +79,21 @@ pub struct IndexStats {
     pub cards: i64,
     pub sources: i64,
     pub last_indexed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReindexReport {
+    pub water_points: i64,
+    pub cards: i64,
+    pub sources: i64,
+    pub files_found: usize,
+    pub files_ok: usize,
+    pub files_failed: usize,
+    pub points_parsed: usize,
+    pub scanned_dirs: Vec<String>,
+    pub errors: Vec<String>,
+    pub last_indexed_at: Option<String>,
+    pub hint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,14 +179,99 @@ fn get_stats(state: tauri::State<'_, Arc<AppState>>) -> Result<IndexStats, Strin
 }
 
 #[tauri::command]
-fn reindex(state: tauri::State<'_, Arc<AppState>>) -> Result<IndexStats, String> {
+async fn reindex(state: tauri::State<'_, Arc<AppState>>) -> Result<ReindexReport, String> {
     let data_path = state.settings.lock().data_path.clone();
     if data_path.trim().is_empty() {
-        return Err("Укажите путь к базе в настройках".into());
+        return Err("Укажите путь к базе в настройках и нажмите «Сохранить»".into());
     }
-    let mut db = state.db.lock();
-    indexer::reindex_all(&mut db, PathBuf::from(data_path))?;
-    db.stats()
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut db = state.db.lock();
+        let report = indexer::reindex_all(&mut db, PathBuf::from(&data_path))?;
+        Ok(ReindexReport {
+            water_points: report.water_points,
+            cards: report.cards,
+            sources: report.sources,
+            files_found: report.files_found,
+            files_ok: report.files_ok,
+            files_failed: report.files_failed,
+            points_parsed: report.points_parsed,
+            scanned_dirs: report.scanned_dirs,
+            errors: report.errors,
+            last_indexed_at: report.last_indexed_at,
+            hint: report.hint,
+        })
+    })
+    .await
+    .map_err(|e| format!("ошибка потока индексации: {e}"))?
+}
+
+#[tauri::command]
+async fn import_kmz_files(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<ReindexReport, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let data_path = state.settings.lock().data_path.clone();
+    if data_path.trim().is_empty() {
+        return Err("Сначала укажите и сохраните путь к базе".into());
+    }
+
+    let files = app
+        .dialog()
+        .file()
+        .add_filter("Карты KML/KMZ", &["kml", "kmz"])
+        .blocking_pick_files();
+
+    let Some(files) = files else {
+        return Ok(ReindexReport {
+            water_points: state.db.lock().stats()?.water_points,
+            cards: state.db.lock().stats()?.cards,
+            sources: state.db.lock().stats()?.sources,
+            files_found: 0,
+            files_ok: 0,
+            files_failed: 0,
+            points_parsed: 0,
+            scanned_dirs: vec![],
+            errors: vec![],
+            last_indexed_at: state.db.lock().stats()?.last_indexed_at,
+            hint: "Импорт отменён".into(),
+        });
+    };
+
+    let paths: Vec<PathBuf> = files
+        .into_iter()
+        .filter_map(|f| f.into_path().ok())
+        .collect();
+
+    if paths.is_empty() {
+        return Err("Не удалось получить пути к выбранным файлам".into());
+    }
+
+    let state = Arc::clone(&state);
+    let root = PathBuf::from(data_path);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut db = state.db.lock();
+        let n = indexer::import_map_files(&mut db, &root, &paths)?;
+        // Full reindex report after import
+        let report = indexer::reindex_all(&mut db, root)?;
+        Ok(ReindexReport {
+            water_points: report.water_points,
+            cards: report.cards,
+            sources: report.sources,
+            files_found: report.files_found,
+            files_ok: report.files_ok,
+            files_failed: report.files_failed,
+            points_parsed: report.points_parsed,
+            scanned_dirs: report.scanned_dirs,
+            errors: report.errors,
+            last_indexed_at: report.last_indexed_at,
+            hint: format!("Импортировано файлов: {n}. {}", report.hint),
+        })
+    })
+    .await
+    .map_err(|e| format!("ошибка импорта: {e}"))?
 }
 
 #[tauri::command]
@@ -273,7 +387,7 @@ fn read_file_base64(path: String) -> Result<String, String> {
 fn pick_data_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let folder = app.dialog().file().blocking_pick_folder();
-    Ok(folder.map(|p| p.to_string()))
+    Ok(folder.and_then(|p| p.into_path().ok().map(|path| path.to_string_lossy().into_owned())))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -303,6 +417,7 @@ pub fn run() {
             save_settings,
             get_stats,
             reindex,
+            import_kmz_files,
             search,
             get_water_in_bounds,
             get_water_point,
