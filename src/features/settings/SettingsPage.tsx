@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import * as api from "../../shared/api";
 import {
   CITIES,
@@ -17,10 +17,18 @@ interface Props {
 export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
   const [form, setForm] = useState<AppSettings>({
     ...settings,
-    default_city: settings.default_city || "Москва",
+    default_city: settings.default_city || "Кемерово",
   });
+  const [cityQuery, setCityQuery] = useState(settings.default_city || "");
+  const [showHints, setShowHints] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+
+  const hints = useMemo(() => {
+    const q = cityQuery.trim().toLowerCase();
+    if (!q) return CITIES.slice(0, 8);
+    return CITIES.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 8);
+  }, [cityQuery]);
 
   async function pickFolder() {
     const path = await api.pickDataFolder();
@@ -49,7 +57,7 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
 
   async function reindex() {
     setBusy(true);
-    setMessage("Сохранение и индексация…");
+    setMessage("Сохранение и индексация… Не закрывайте окно.");
     try {
       await ensureSaved();
       const report = await api.reindex();
@@ -59,7 +67,7 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
           ? `\nОшибки:\n- ${report.errors.slice(0, 5).join("\n- ")}`
           : "";
       setMessage(
-        `${report.hint}\nФайлов найдено: ${report.files_found}, точек: ${report.points_parsed}, карточек: ${report.cards}${errTail}`
+        `${report.hint}\nФайлов карт: ${report.files_found}, точек: ${report.points_parsed}, карточек: ${report.cards}${errTail}`
       );
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
@@ -70,13 +78,13 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
 
   async function importKmz() {
     setBusy(true);
-    setMessage("Выберите файлы KML/KMZ…");
+    setMessage("Выберите файлы KML/KMZ… После выбора идёт индексация — подождите.");
     try {
       await ensureSaved();
       const report = await api.importKmzFiles();
       await onReindexed();
       setMessage(
-        `${report.hint}\nФайлов: ${report.files_found}, точек: ${report.points_parsed}`
+        `${report.hint}\nИмпортировано файлов: ${report.files_ok}, ВО в индексе: ${report.water_points}`
       );
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
@@ -86,9 +94,13 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
   }
 
   function applyCity(name: string) {
-    const city = CITIES.find((c) => c.name === name);
+    const city = CITIES.find((c) => c.name.toLowerCase() === name.toLowerCase())
+      ?? CITIES.find((c) => c.name.toLowerCase().includes(name.trim().toLowerCase()));
     if (!city) {
       setForm((f) => ({ ...f, default_city: name }));
+      setCityQuery(name);
+      setShowHints(false);
+      setMessage(`Город «${name}» сохранён как название. Выберите город из подсказок, чтобы задать координаты карты.`);
       return;
     }
     setForm((f) => ({
@@ -98,6 +110,14 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
       default_lon: city.lon,
       default_zoom: city.zoom,
     }));
+    setCityQuery(city.name);
+    setShowHints(false);
+  }
+
+  function searchCity() {
+    const q = cityQuery.trim();
+    if (!q) return;
+    applyCity(q);
   }
 
   return (
@@ -112,25 +132,26 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
         <h2 style={{ margin: 0 }}>Настройки</h2>
 
         <div className="field">
-          <label>Путь к базе данных (FireData)</label>
+          <label>Путь к базе данных</label>
           <div className="row">
             <input
               value={form.data_path}
               onChange={(e) => setForm({ ...form, data_path: e.target.value })}
-              placeholder="D:\FireData"
+              placeholder="Z:\ или папка с KMZ и Информационные карточки"
             />
             <button type="button" className="btn" onClick={() => void pickFolder()}>
               Обзор…
             </button>
           </div>
           <div className="muted">
-            Ожидаются папки <code>KMZ</code> / <code>Maps</code> и <code>KTP</code>. Либо
-            загрузите файлы кнопкой ниже.
+            Ищутся папки <code>KMZ</code>/<code>Maps</code> и{" "}
+            <code>Информационные карточки</code> (или <code>KTP</code>). Можно указать сам
+            диск Yandex IPSCH (Z:).
           </div>
         </div>
 
         <div className="field">
-          <label>Импорт карты водоисточников</label>
+          <label>Водоисточники (KML/KMZ)</label>
           <div className="actions">
             <button
               type="button"
@@ -150,25 +171,56 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
             </button>
           </div>
           <div className="muted">
-            Импорт копирует выбранные файлы в папку KMZ внутри базы и сразу строит индекс.
+            Большие файлы индексируются несколько секунд — окно может ненадолго «думать», это
+            нормально.
           </div>
         </div>
 
-        <div className="field">
+        <div className="field city-field">
           <label>Город по умолчанию</label>
-          <select
-            value={form.default_city || "Москва"}
-            onChange={(e) => applyCity(e.target.value)}
-          >
-            {CITIES.map((c) => (
-              <option key={c.name} value={c.name}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+          <div className="row">
+            <input
+              value={cityQuery}
+              placeholder="Начните вводить: Кемерово…"
+              onChange={(e) => {
+                setCityQuery(e.target.value);
+                setShowHints(true);
+              }}
+              onFocus={() => setShowHints(true)}
+              onBlur={() => {
+                // delay so click on hint registers
+                window.setTimeout(() => setShowHints(false), 150);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  searchCity();
+                }
+              }}
+            />
+            <button type="button" className="btn primary" onClick={searchCity}>
+              Найти
+            </button>
+          </div>
+          {showHints && hints.length > 0 && (
+            <div className="city-hints">
+              {hints.map((c) => (
+                <button
+                  key={c.name}
+                  type="button"
+                  className="city-hint"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => applyCity(c.name)}
+                >
+                  {c.name}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="muted">
-            Карта откроется на этом городе. Координаты: {form.default_lat.toFixed(4)},{" "}
-            {form.default_lon.toFixed(4)}
+            Введите название и Enter / «Найти», либо выберите подсказку. Сейчас:{" "}
+            <strong>{form.default_city}</strong> ({form.default_lat.toFixed(4)},{" "}
+            {form.default_lon.toFixed(4)})
           </div>
         </div>
 
@@ -185,8 +237,8 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
             <option value="dgis">2ГИС (нужен ключ)</option>
           </select>
           <div className="muted">
-            API-ключ нужен только для Яндекс/2ГИС: их тайлы, поиск адреса и геокодер. Без ключа
-            карта уже работает через OpenStreetMap.
+            Ключ Яндекс/2ГИС — только для их карты и поиска адреса. KMZ и карточки работают без
+            ключа.
           </div>
         </div>
 

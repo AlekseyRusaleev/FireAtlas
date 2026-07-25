@@ -254,20 +254,22 @@ async fn import_kmz_files(
     tauri::async_runtime::spawn_blocking(move || {
         let mut db = state.db.lock();
         let n = indexer::import_map_files(&mut db, &root, &paths)?;
-        // Full reindex report after import
-        let report = indexer::reindex_all(&mut db, root)?;
+        let stats = db.stats()?;
         Ok(ReindexReport {
-            water_points: report.water_points,
-            cards: report.cards,
-            sources: report.sources,
-            files_found: report.files_found,
-            files_ok: report.files_ok,
-            files_failed: report.files_failed,
-            points_parsed: report.points_parsed,
-            scanned_dirs: report.scanned_dirs,
-            errors: report.errors,
-            last_indexed_at: report.last_indexed_at,
-            hint: format!("Импортировано файлов: {n}. {}", report.hint),
+            water_points: stats.water_points,
+            cards: stats.cards,
+            sources: stats.sources,
+            files_found: n,
+            files_ok: n,
+            files_failed: 0,
+            points_parsed: stats.water_points as usize,
+            scanned_dirs: vec![root.join("KMZ").display().to_string()],
+            errors: vec![],
+            last_indexed_at: stats.last_indexed_at,
+            hint: format!(
+                "Импортировано файлов: {n}. Водоисточников в индексе: {}.",
+                stats.water_points
+            ),
         })
     })
     .await

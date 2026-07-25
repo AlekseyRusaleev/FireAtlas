@@ -345,6 +345,38 @@ button {
   flex: 1;
 }
 
+.city-field {
+  position: relative;
+}
+
+.city-hints {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow: hidden;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.city-hint {
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  padding: 0.55rem 0.75rem;
+}
+
+.city-hint:last-child {
+  border-bottom: 0;
+}
+
+.city-hint:hover {
+  background: var(--bg-panel);
+}
+
 .status-banner {
   padding: 0.65rem 0.85rem;
   border-radius: var(--radius);

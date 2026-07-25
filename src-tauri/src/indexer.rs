@@ -214,16 +214,26 @@ fn index_cards(db: &mut Db, root: &Path, report: &mut ReindexReport) -> Result<(
     let candidates = [
         root.join("KTP"),
         root.join("ktp"),
+        root.join("КТП"),
         root.join("Cards"),
         root.join("cards"),
         root.join("Карточки"),
-        root.join("КТП"),
+        root.join("Информационные карточки"),
+        root.join("информационные карточки"),
+        root.join("ИК"),
     ];
 
-    for dir in candidates {
-        if !dir.exists() {
-            continue;
-        }
+    let mut dirs: Vec<PathBuf> = candidates.into_iter().filter(|d| d.is_dir()).collect();
+
+    // If the data root itself looks like a cards folder (children named "ИК …"), index it.
+    if looks_like_cards_root(root) {
+        dirs.push(root.to_path_buf());
+    }
+
+    dirs.sort();
+    dirs.dedup();
+
+    for dir in dirs {
         report.scanned_dirs.push(dir.display().to_string());
         for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
@@ -240,6 +250,20 @@ fn index_cards(db: &mut Db, root: &Path, report: &mut ReindexReport) -> Result<(
         }
     }
     Ok(())
+}
+
+fn looks_like_cards_root(root: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    let mut ik = 0usize;
+    for entry in entries.flatten().take(30) {
+        let name = entry.file_name().to_string_lossy().to_uppercase();
+        if entry.path().is_dir() && (name.starts_with("ИК") || name.starts_with("IK")) {
+            ik += 1;
+        }
+    }
+    ik >= 3
 }
 
 pub fn import_map_files(db: &mut Db, data_root: &Path, files: &[PathBuf]) -> Result<usize, String> {
@@ -336,13 +360,13 @@ fn index_card_folder(db: &mut Db, folder: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let number = extract_number(&title);
+    let parsed = parse_card_title(&title);
     let folder_str = folder.to_string_lossy().to_string();
     let card_id = db.upsert_card(
-        &title,
-        None,
-        None,
-        number.as_deref(),
+        &parsed.title,
+        parsed.address.as_deref(),
+        parsed.district.as_deref(),
+        parsed.number.as_deref(),
         &folder_str,
         mtime,
         &body,
@@ -360,11 +384,60 @@ fn index_card_folder(db: &mut Db, folder: &Path) -> Result<(), String> {
 }
 
 fn extract_number(title: &str) -> Option<String> {
-    let digits: String = title.chars().filter(|c| c.is_ascii_digit()).collect();
+    // Prefer "ИК №12" / "№12" style numbers
+    let upper = title.replace('№', "№");
+    if let Some(pos) = upper.find('№') {
+        let tail: String = upper[pos + '№'.len_utf8()..]
+            .chars()
+            .skip_while(|c| c.is_whitespace())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !tail.is_empty() {
+            return Some(tail);
+        }
+    }
+    let digits: String = title.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
     if digits.is_empty() {
         None
     } else {
         Some(digits)
+    }
+}
+
+struct ParsedCardTitle {
+    title: String,
+    number: Option<String>,
+    address: Option<String>,
+    district: Option<String>,
+}
+
+fn parse_card_title(raw: &str) -> ParsedCardTitle {
+    let number = extract_number(raw);
+    // Heuristic: address often after last comma or after closing «...»
+    let address = {
+        let mut addr = None;
+        if let Some(idx) = raw.rfind(',') {
+            let tail = raw[idx + 1..].trim();
+            if tail.len() > 3 {
+                addr = Some(tail.to_string());
+            }
+        }
+        if addr.is_none() {
+            if let Some(idx) = raw.rfind('»') {
+                let tail = raw[idx + '»'.len_utf8()..].trim().trim_start_matches(',').trim();
+                if tail.len() > 3 {
+                    addr = Some(tail.to_string());
+                }
+            }
+        }
+        addr
+    };
+
+    ParsedCardTitle {
+        title: raw.to_string(),
+        number,
+        address,
+        district: None,
     }
 }
 

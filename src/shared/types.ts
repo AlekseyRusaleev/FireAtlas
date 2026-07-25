@@ -105,6 +105,10 @@ export const WATER_TYPE_SHORT: Record<WaterType, string> = {
 
 /** Russian cities for default map center */
 export const CITIES: { name: string; lat: number; lon: number; zoom: number }[] = [
+  { name: "Кемерово", lat: 55.3549, lon: 86.0885, zoom: 12 },
+  { name: "Новокузнецк", lat: 53.7596, lon: 87.1216, zoom: 12 },
+  { name: "Томск", lat: 56.4846, lon: 84.9476, zoom: 12 },
+  { name: "Барнаул", lat: 53.3468, lon: 83.7768, zoom: 12 },
   { name: "Москва", lat: 55.7558, lon: 37.6173, zoom: 11 },
   { name: "Санкт-Петербург", lat: 59.9343, lon: 30.3351, zoom: 11 },
   { name: "Новосибирск", lat: 55.0084, lon: 82.9357, zoom: 11 },
