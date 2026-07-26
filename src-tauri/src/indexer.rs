@@ -120,6 +120,10 @@ fn collect_under(dir: &Path, max_depth: usize, out: &mut Vec<PathBuf>) {
 }
 
 fn is_map_file(path: &Path) -> bool {
+    // Экспорт пользовательских меток лежит рядом с базой — его нельзя тянуть в индекс ИППВ.
+    if crate::markers::is_markers_file(path) {
+        return false;
+    }
     matches!(
         path.extension()
             .and_then(|e| e.to_str())

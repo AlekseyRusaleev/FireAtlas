@@ -148,23 +148,6 @@ button {
   border-color: var(--focus);
 }
 
-.filters {
-  display: grid;
-  gap: 0.35rem;
-}
-
-.filters label {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--text-muted);
-  font-size: 0.92rem;
-}
-
-.filters input {
-  accent-color: var(--accent);
-}
-
 .results {
   display: flex;
   flex-direction: column;
@@ -211,10 +194,55 @@ button {
 .badge.tower { background: color-mix(in srgb, var(--tower) 35%, transparent); }
 .badge.pier { background: color-mix(in srgb, var(--pier) 35%, transparent); }
 .badge.card { background: color-mix(in srgb, var(--card) 35%, transparent); }
+.badge.marker { background: color-mix(in srgb, #9b59b6 40%, transparent); }
 
 .map-pane {
   position: relative;
   min-height: 0;
+}
+
+.map-toolbar {
+  position: absolute;
+  top: 0.6rem;
+  left: 0.6rem;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Штатный зум Leaflet живёт в том же углу — сдвигаем его под нашу панель. */
+.map-pane .leaflet-top.leaflet-left {
+  margin-top: 2.9rem;
+}
+
+.map-toolbar .btn {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+
+.map-toolbar-hint {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.marker-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.7rem;
+  border: 1px solid var(--accent-soft);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+.marker-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.35rem;
 }
 
 .map-pane .leaflet-container,
@@ -222,6 +250,30 @@ button {
   width: 100%;
   height: 100%;
   background: #12161a;
+}
+
+.provider-map-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.map-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 600;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  text-align: center;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  color: var(--text);
+}
+
+.map-overlay.error {
+  color: #f5d7cf;
 }
 
 .map-missing-key {
@@ -298,6 +350,29 @@ button {
   color: var(--text-muted);
 }
 
+.kml-description {
+  font-size: 0.88rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.kml-description table {
+  border-collapse: collapse;
+  margin: 0.4rem 0;
+  width: 100%;
+}
+
+.kml-description td,
+.kml-description th {
+  border: 1px solid var(--border);
+  padding: 0.2rem 0.35rem;
+  text-align: left;
+}
+
+.kml-description a {
+  color: var(--accent);
+}
+
 .nearby-list {
   display: flex;
   flex-direction: column;
@@ -311,9 +386,16 @@ button {
   background: var(--bg);
 }
 
-.cards-layout,
-.settings-layout {
+.cards-layout {
   grid-template-columns: 380px 1fr;
+}
+
+/* Одна колонка + прокрутка: иначе кнопка «Сохранить» уезжает за край окна. */
+.settings-layout {
+  grid-template-columns: 1fr;
+  overflow: auto;
+  align-content: start;
+  background: var(--bg);
 }
 
 .viewer {
@@ -329,6 +411,29 @@ button {
   background: #fff;
 }
 
+.docx-host {
+  margin-top: 1rem;
+  border-radius: var(--radius);
+  overflow: auto;
+  max-height: 78vh;
+  background: #f2f2f2;
+}
+
+.docx-host.is-empty {
+  display: none;
+}
+
+/* docx-preview рисует страницы документа — им нужен светлый лист и тёмный текст */
+.docx-host .docx-wrapper {
+  padding: 1rem;
+  background: #f2f2f2;
+}
+
+.docx-host .docx {
+  color: #111;
+  background: #fff;
+}
+
 .file-list {
   display: flex;
   flex-wrap: wrap;
@@ -337,10 +442,52 @@ button {
 }
 
 .settings-form {
-  max-width: 640px;
-  padding: 1.25rem;
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 1.25rem 1.25rem 2rem;
   display: grid;
   gap: 1rem;
+}
+
+.settings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 0.75rem 0 0.5rem;
+  background: linear-gradient(var(--bg) 70%, transparent);
+}
+
+.status-banner.ok {
+  border-color: color-mix(in srgb, #2ecc71 45%, var(--border));
+  color: #d7f5e3;
+}
+
+.status-banner.warn {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: #f5d7cf;
+}
+
+.source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
+.source-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
 }
 
 .field {

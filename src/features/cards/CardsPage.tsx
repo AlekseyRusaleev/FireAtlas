@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as api from "../../shared/api";
 import type { Card, CardFile } from "../../shared/types";
 
@@ -6,10 +6,17 @@ interface Props {
   initialCardId?: number | null;
 }
 
-function fileLabel(kind: string): string {
-  switch (kind) {
+function fileExt(file: CardFile): string {
+  const fromName = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const fromPath = file.path.split(/[/\\]/).pop()?.split(".").pop()?.toLowerCase() ?? "";
+  return fromName || fromPath;
+}
+
+function fileLabel(file: CardFile): string {
+  const ext = fileExt(file);
+  switch (file.kind) {
     case "word":
-      return "Word";
+      return ext === "docx" ? "Word (DOCX)" : ext === "doc" ? "Word (DOC)" : `Word (${ext || "?"})`;
     case "visio":
       return "Visio";
     case "pdf":
@@ -21,14 +28,53 @@ function fileLabel(kind: string): string {
   }
 }
 
+/** Что реально можно показать внутри окна приложения. */
+function canPreviewInApp(file: CardFile): boolean {
+  if (file.kind === "jpg" || file.kind === "pdf") return true;
+  if (file.kind === "word" && fileExt(file) === "docx") return true;
+  return false;
+}
+
+function previewHint(file: CardFile): string {
+  if (canPreviewInApp(file)) return "откроется в окне программы";
+  if (file.kind === "word") {
+    return "старый формат .doc — только во внешнем Word (сохраните как .docx для просмотра внутри)";
+  }
+  if (file.kind === "visio") return "только во внешнем Visio";
+  return "откроется во внешней программе";
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const raw = atob(b64);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+  return bytes;
+}
+
+function bytesToBlobUrl(bytes: Uint8Array, mime: string): string {
+  const copy = Uint8Array.from(bytes);
+  return URL.createObjectURL(new Blob([copy.buffer], { type: mime }));
+}
+
 export function CardsPage({ initialCardId = null }: Props) {
   const [query, setQuery] = useState("");
   const [cards, setCards] = useState<Card[]>([]);
   const [selected, setSelected] = useState<Card | null>(null);
   const [activeFile, setActiveFile] = useState<CardFile | null>(null);
-  const [preview, setPreview] = useState<{ mime: string; dataUrl: string } | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<{ mime: string; url: string } | null>(null);
+  const [docxBytes, setDocxBytes] = useState<Uint8Array | null>(null);
+  const [openedExternally, setOpenedExternally] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const docxHostRef = useRef<HTMLDivElement>(null);
+  const previewUrlRef = useRef<string | null>(null);
+
+  function revokePreviewUrl() {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
+    }
+  }
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -46,12 +92,60 @@ export function CardsPage({ initialCardId = null }: Props) {
       const full = await api.getCard(initialCardId);
       if (full) {
         setSelected(full);
-        setActiveFile(null);
-        setPreview(null);
+        resetPreview();
         await api.addHistory("card", full.id, full.title);
+        const first = full.files.find(canPreviewInApp);
+        if (first) void openFile(first);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialCardId]);
+
+  useEffect(() => {
+    const host = docxHostRef.current;
+    if (!host) return;
+    host.replaceChildren();
+    if (!docxBytes) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { renderAsync } = await import("docx-preview");
+        if (cancelled) return;
+        await renderAsync(docxBytes, host, undefined, {
+          className: "docx",
+          inWrapper: true,
+          ignoreWidth: true,
+          ignoreHeight: true,
+          breakPages: true,
+          useBase64URL: true,
+        });
+      } catch (e) {
+        if (cancelled) return;
+        host.replaceChildren();
+        setError(
+          `Не удалось показать DOCX в окне: ${e instanceof Error ? e.message : String(e)}` +
+            "\nНажмите «Открыть внешне»."
+        );
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [docxBytes]);
+
+  useEffect(() => {
+    return () => revokePreviewUrl();
+  }, []);
+
+  function resetPreview() {
+    setActiveFile(null);
+    revokePreviewUrl();
+    setPreviewUrl(null);
+    setDocxBytes(null);
+    setOpenedExternally(false);
+  }
 
   async function openCard(card: Card) {
     setBusy(true);
@@ -63,9 +157,10 @@ export function CardsPage({ initialCardId = null }: Props) {
         return;
       }
       setSelected(full);
-      setActiveFile(null);
-      setPreview(null);
+      resetPreview();
       await api.addHistory("card", full.id, full.title);
+      const first = full.files.find(canPreviewInApp);
+      if (first) await openFile(first);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -74,39 +169,65 @@ export function CardsPage({ initialCardId = null }: Props) {
   }
 
   async function openFile(file: CardFile) {
-    setActiveFile(file);
     setError(null);
     setBusy(true);
+    revokePreviewUrl();
+    setPreviewUrl(null);
+    setDocxBytes(null);
+    setOpenedExternally(false);
+    setActiveFile(file);
     try {
-      // Images can preview; Office docs open in Word/Visio via OS
       if (file.kind === "jpg") {
         const b64 = await api.readFileBase64(file.path);
-        const lower = file.path.toLowerCase();
-        const mime = lower.endsWith(".png")
-          ? "image/png"
-          : lower.endsWith(".webp")
-            ? "image/webp"
-            : "image/jpeg";
-        setPreview({ mime, dataUrl: `data:${mime};base64,${b64}` });
+        const ext = fileExt(file);
+        const mime =
+          ext === "png"
+            ? "image/png"
+            : ext === "webp"
+              ? "image/webp"
+              : ext === "bmp"
+                ? "image/bmp"
+                : "image/jpeg";
+        const url = bytesToBlobUrl(base64ToBytes(b64), mime);
+        previewUrlRef.current = url;
+        setPreviewUrl({ mime, url });
         return;
       }
       if (file.kind === "pdf") {
         const b64 = await api.readFileBase64(file.path);
-        setPreview({
-          mime: "application/pdf",
-          dataUrl: `data:application/pdf;base64,${b64}`,
-        });
+        const url = bytesToBlobUrl(base64ToBytes(b64), "application/pdf");
+        previewUrlRef.current = url;
+        setPreviewUrl({ mime: "application/pdf", url });
         return;
       }
-      setPreview(null);
+      if (file.kind === "word" && fileExt(file) === "docx") {
+        const b64 = await api.readFileBase64(file.path);
+        setDocxBytes(base64ToBytes(b64));
+        return;
+      }
+      // .doc / Visio и прочее — только внешне, с понятным пояснением.
       await api.openPath(file.path);
+      setOpenedExternally(true);
     } catch (e) {
       setError(
         (e instanceof Error ? e.message : String(e)) +
-          "\nЕсли файл в облаке Z: — откройте папку и дождитесь скачивания, затем снова «Открыть»."
+          "\nЕсли файл в облаке Z: — откройте папку и дождитесь скачивания, затем снова «Просмотр»."
       );
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openExternally(file: CardFile) {
+    setError(null);
+    try {
+      await api.openPath(file.path);
+      setOpenedExternally(true);
+    } catch (e) {
+      setError(
+        (e instanceof Error ? e.message : String(e)) +
+          "\nЕсли файл в облаке Z: — откройте папку и дождитесь скачивания."
+      );
     }
   }
 
@@ -163,6 +284,9 @@ export function CardsPage({ initialCardId = null }: Props) {
             </div>
 
             <h3 style={{ margin: "0.5rem 0" }}>Документы</h3>
+            <div className="muted" style={{ marginBottom: "0.5rem" }}>
+              Внутри программы: JPG, PDF и DOCX. Старые DOC и Visio — только во внешней программе.
+            </div>
             {selected.files.length === 0 && (
               <div className="status-banner">
                 В индексе нет файлов. Откройте папку вручную — возможно, облако ещё не скачало
@@ -175,19 +299,22 @@ export function CardsPage({ initialCardId = null }: Props) {
                 <div key={f.id} className="doc-row">
                   <div>
                     <strong>
-                      {fileLabel(f.kind)}: {f.name}
+                      {fileLabel(f)}: {f.name}
                     </strong>
                     <div className="muted" style={{ fontSize: "0.8rem" }}>
-                      {f.path}
+                      {previewHint(f)}
                     </div>
                   </div>
                   <div className="actions">
                     <button
-                      className="btn primary"
+                      className={`btn ${canPreviewInApp(f) ? "primary" : ""}`}
                       disabled={busy}
                       onClick={() => void openFile(f)}
                     >
-                      Открыть
+                      {canPreviewInApp(f) ? "Просмотр" : "Открыть"}
+                    </button>
+                    <button className="btn" onClick={() => void openExternally(f)}>
+                      Внешне
                     </button>
                   </div>
                 </div>
@@ -195,32 +322,39 @@ export function CardsPage({ initialCardId = null }: Props) {
             </div>
 
             {error && (
-              <div className="status-banner" style={{ whiteSpace: "pre-wrap", marginTop: "0.75rem" }}>
+              <div className="status-banner warn" style={{ whiteSpace: "pre-wrap", marginTop: "0.75rem" }}>
                 {error}
               </div>
             )}
 
-            {activeFile && (activeFile.kind === "word" || activeFile.kind === "visio") && (
+            {openedExternally && activeFile && (
               <div className="status-banner" style={{ marginTop: "0.75rem" }}>
-                Файл открывается во внешней программе (Word / Visio). Если ничего не произошло —
-                файл ещё в облаке: нажмите «Открыть папку карточки».
+                {fileLabel(activeFile)} открыт во внешней программе.{" "}
+                {activeFile.kind === "word" && fileExt(activeFile) !== "docx"
+                  ? "Чтобы смотреть внутри Атласа — сохраните файл как .docx."
+                  : null}
               </div>
             )}
 
-            {preview?.mime.startsWith("image/") && (
+            {previewUrl?.mime.startsWith("image/") && (
               <img
-                src={preview.dataUrl}
+                src={previewUrl.url}
                 alt={activeFile?.name || "preview"}
                 style={{ marginTop: "1rem" }}
               />
             )}
-            {preview?.mime === "application/pdf" && (
+            {previewUrl?.mime === "application/pdf" && (
               <iframe
                 title="pdf"
-                src={preview.dataUrl}
+                src={previewUrl.url}
                 style={{ width: "100%", height: "70vh", border: 0, marginTop: "1rem" }}
               />
             )}
+            <div
+              ref={docxHostRef}
+              className={`docx-host ${docxBytes ? "" : "is-empty"}`}
+              aria-label="Просмотр документа Word"
+            />
           </>
         )}
       </section>

@@ -3,9 +3,11 @@ import type {
   AppSettings,
   Card,
   IndexStats,
+  MarkersState,
   NearbyPoint,
   ReindexReport,
   SearchHit,
+  SourceInfo,
   WaterPoint,
   WaterType,
 } from "./types";
@@ -89,6 +91,31 @@ export async function toggleFavorite(kind: string, id: number, title: string): P
 
 export async function getFavorites(): Promise<SearchHit[]> {
   return invoke("get_favorites");
+}
+
+export async function listSources(): Promise<SourceInfo[]> {
+  return invoke("list_sources");
+}
+
+export async function deleteSource(id: number): Promise<SourceInfo[]> {
+  return invoke("delete_source", { id });
+}
+
+export async function listMarkers(): Promise<MarkersState> {
+  return invoke("list_markers");
+}
+
+export async function addMarker(
+  name: string,
+  comment: string | null,
+  lat: number,
+  lon: number
+): Promise<MarkersState> {
+  return invoke("add_marker", { name, comment, lat, lon });
+}
+
+export async function deleteMarker(id: number): Promise<MarkersState> {
+  return invoke("delete_marker", { id });
 }
 
 export async function openPath(path: string): Promise<void> {

@@ -78,6 +78,16 @@ export interface Card {
   files: CardFile[];
 }
 
+export interface SourceInfo {
+  id: number;
+  path: string;
+  kind: string;
+  mtime: number;
+  status: string;
+  point_count: number;
+  file_name: string;
+}
+
 export interface NearbyPoint {
   id: number;
   name: string;
@@ -87,13 +97,27 @@ export interface NearbyPoint {
   distance_m: number;
 }
 
-export const WATER_TYPE_LABELS: Record<WaterType, string> = {
-  hydrant: "Гидранты",
-  pond: "Водоёмы",
-  tower: "Башни",
-  pier: "Пирсы",
-  other: "Прочее",
-};
+export interface UserMarker {
+  id: number;
+  name: string;
+  comment: string | null;
+  lat: number;
+  lon: number;
+  created_at: string;
+}
+
+export interface MarkerFileInfo {
+  path: string;
+  count: number;
+}
+
+export interface MarkersState {
+  markers: UserMarker[];
+  /** null, если путь к базе не задан — метки хранятся только в приложении. */
+  file: MarkerFileInfo | null;
+  /** Метки сохранены в базе, но выгрузить KML не удалось (например, сеть недоступна). */
+  file_error: string | null;
+}
 
 export const WATER_TYPE_SHORT: Record<WaterType, string> = {
   hydrant: "Гидрант",

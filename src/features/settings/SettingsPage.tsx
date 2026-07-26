@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as api from "../../shared/api";
 import {
   CITIES,
   type AppSettings,
   type IndexStats,
   type MapProviderId,
+  type SourceInfo,
 } from "../../shared/types";
 
 interface Props {
@@ -12,9 +13,20 @@ interface Props {
   stats: IndexStats | null;
   onSaved: (settings: AppSettings) => Promise<void>;
   onReindexed: () => Promise<void>;
+  onOpenMap?: () => void;
 }
 
-export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
+function normalize(form: AppSettings): AppSettings {
+  return {
+    ...form,
+    data_path: form.data_path.trim(),
+    yandex_api_key: form.yandex_api_key.trim(),
+    dgis_api_key: form.dgis_api_key.trim(),
+    default_city: form.default_city.trim() || "Кемерово",
+  };
+}
+
+export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap }: Props) {
   const [form, setForm] = useState<AppSettings>({
     ...settings,
     default_city: settings.default_city || "Кемерово",
@@ -23,6 +35,34 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
   const [showHints, setShowHints] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageOk, setMessageOk] = useState(false);
+  const [sources, setSources] = useState<SourceInfo[]>([]);
+
+  async function refreshSources() {
+    try {
+      setSources(await api.listSources());
+    } catch {
+      /* список источников не критичен при старте */
+    }
+  }
+
+  useEffect(() => {
+    setForm({
+      ...settings,
+      default_city: settings.default_city || "Кемерово",
+    });
+    setCityQuery(settings.default_city || "");
+  }, [settings]);
+
+  useEffect(() => {
+    void refreshSources();
+  }, []);
+
+  const dirty = useMemo(() => {
+    const a = normalize(form);
+    const b = normalize(settings);
+    return JSON.stringify(a) !== JSON.stringify(b);
+  }, [form, settings]);
 
   const hints = useMemo(() => {
     const q = cityQuery.trim().toLowerCase();
@@ -36,7 +76,8 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
   }
 
   async function ensureSaved(): Promise<AppSettings> {
-    const saved = await api.saveSettings(form);
+    const next = normalize(form);
+    const saved = await api.saveSettings(next);
     await onSaved(saved);
     setForm(saved);
     return saved;
@@ -45,11 +86,24 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
   async function save() {
     setBusy(true);
     setMessage(null);
+    setMessageOk(false);
     try {
-      await ensureSaved();
-      setMessage("Настройки сохранены");
+      const saved = await ensureSaved();
+      const parts = ["Настройки сохранены."];
+      if (saved.map_provider === "yandex") {
+        if (saved.yandex_api_key) {
+          parts.push(
+            `Ключ Яндекса сохранён (${saved.yandex_api_key.slice(0, 8)}…). Откройте вкладку «Карта».`
+          );
+        } else {
+          parts.push("Ключ Яндекса пустой — карта не загрузится. Вставьте ключ и снова нажмите «Сохранить».");
+        }
+      }
+      setMessage(parts.join(" "));
+      setMessageOk(true);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
+      setMessageOk(false);
     } finally {
       setBusy(false);
     }
@@ -58,10 +112,12 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
   async function reindex() {
     setBusy(true);
     setMessage("Сохранение и индексация… Не закрывайте окно.");
+    setMessageOk(false);
     try {
       await ensureSaved();
       const report = await api.reindex();
       await onReindexed();
+      await refreshSources();
       const errTail =
         report.errors.length > 0
           ? `\nОшибки:\n- ${report.errors.slice(0, 5).join("\n- ")}`
@@ -69,8 +125,10 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
       setMessage(
         `${report.hint}\nФайлов карт: ${report.files_found}, точек: ${report.points_parsed}, карточек: ${report.cards}${errTail}`
       );
+      setMessageOk(report.files_failed === 0);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
+      setMessageOk(false);
     } finally {
       setBusy(false);
     }
@@ -79,28 +137,55 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
   async function importKmz() {
     setBusy(true);
     setMessage("Выберите файлы KML/KMZ… После выбора идёт индексация — подождите.");
+    setMessageOk(false);
     try {
       await ensureSaved();
       const report = await api.importKmzFiles();
       await onReindexed();
+      await refreshSources();
       setMessage(
-        `${report.hint}\nИмпортировано файлов: ${report.files_ok}, ВО в индексе: ${report.water_points}`
+        `${report.hint}\nФайлы добавляются параллельно к уже загруженным (не затирают другие).\nИмпортировано файлов: ${report.files_ok}, ИППВ в индексе: ${report.water_points}`
       );
+      setMessageOk(true);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
+      setMessageOk(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeSource(id: number, name: string) {
+    if (!window.confirm(`Удалить файл «${name}» из индекса вместе с его метками ИППВ?`)) {
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    try {
+      setSources(await api.deleteSource(id));
+      await onReindexed();
+      setMessage(`Файл «${name}» удалён из индекса. Остальные файлы не затронуты.`);
+      setMessageOk(true);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+      setMessageOk(false);
     } finally {
       setBusy(false);
     }
   }
 
   function applyCity(name: string) {
-    const city = CITIES.find((c) => c.name.toLowerCase() === name.toLowerCase())
-      ?? CITIES.find((c) => c.name.toLowerCase().includes(name.trim().toLowerCase()));
+    const city =
+      CITIES.find((c) => c.name.toLowerCase() === name.toLowerCase()) ??
+      CITIES.find((c) => c.name.toLowerCase().includes(name.trim().toLowerCase()));
     if (!city) {
       setForm((f) => ({ ...f, default_city: name }));
       setCityQuery(name);
       setShowHints(false);
-      setMessage(`Город «${name}» сохранён как название. Выберите город из подсказок, чтобы задать координаты карты.`);
+      setMessage(
+        `Город «${name}» сохранён как название. Выберите город из подсказок, чтобы задать координаты карты.`
+      );
+      setMessageOk(false);
       return;
     }
     setForm((f) => ({
@@ -129,7 +214,35 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
           void save();
         }}
       >
-        <h2 style={{ margin: 0 }}>Настройки</h2>
+        <div className="settings-head">
+          <div>
+            <h2 style={{ margin: 0 }}>Настройки</h2>
+            <div className="muted" style={{ marginTop: 4 }}>
+              {dirty
+                ? "Есть несохранённые изменения — нажмите «Сохранить»."
+                : "Все изменения сохранены."}
+            </div>
+          </div>
+          <div className="actions">
+            <button className="btn primary" type="submit" disabled={busy}>
+              {busy ? "Сохранение…" : "Сохранить"}
+            </button>
+            {messageOk && form.map_provider === "yandex" && form.yandex_api_key.trim() && onOpenMap && (
+              <button type="button" className="btn" onClick={onOpenMap}>
+                Открыть карту
+              </button>
+            )}
+          </div>
+        </div>
+
+        {message && (
+          <div
+            className={`status-banner ${messageOk ? "ok" : "warn"}`}
+            style={{ whiteSpace: "pre-wrap" }}
+          >
+            {message}
+          </div>
+        )}
 
         <div className="field">
           <label>Путь к базе данных</label>
@@ -145,13 +258,13 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
           </div>
           <div className="muted">
             Ищутся папки <code>KMZ</code>/<code>Maps</code> и{" "}
-            <code>Информационные карточки</code> (или <code>KTP</code>). Можно указать сам
-            диск Yandex IPSCH (Z:).
+            <code>Информационные карточки</code> (или <code>KTP</code>). Можно указать сам диск
+            Yandex IPSCH (Z:).
           </div>
         </div>
 
         <div className="field">
-          <label>Водоисточники (KML/KMZ)</label>
+          <label>ИППВ (KML/KMZ)</label>
           <div className="actions">
             <button
               type="button"
@@ -159,21 +272,41 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
               disabled={busy}
               onClick={() => void importKmz()}
             >
-              Импорт KML / KMZ…
+              Добавить KML / KMZ…
             </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={busy}
-              onClick={() => void reindex()}
-            >
+            <button type="button" className="btn" disabled={busy} onClick={() => void reindex()}>
               Переиндексировать базу
             </button>
           </div>
           <div className="muted">
-            Большие файлы индексируются несколько секунд — окно может ненадолго «думать», это
-            нормально.
+            Новый импорт <strong>добавляет</strong> файлы к уже загруженным. Чтобы заменить файл —
+            удалите старый в списке ниже и импортируйте новый. Повторный импорт того же пути
+            обновляет только его точки.
           </div>
+          {sources.length === 0 ? (
+            <div className="status-banner">Файлы карт ещё не загружены</div>
+          ) : (
+            <div className="source-list">
+              {sources.map((s) => (
+                <div key={s.id} className="source-row">
+                  <div>
+                    <strong>{s.file_name}</strong>
+                    <div className="muted" style={{ fontSize: "0.8rem" }}>
+                      {s.point_count} точек · {s.path}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy}
+                    onClick={() => void removeSource(s.id, s.file_name)}
+                  >
+                    Удалить
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="field city-field">
@@ -188,7 +321,6 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
               }}
               onFocus={() => setShowHints(true)}
               onBlur={() => {
-                // delay so click on hint registers
                 window.setTimeout(() => setShowHints(false), 150);
               }}
               onKeyDown={(e) => {
@@ -220,7 +352,8 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
           <div className="muted">
             Введите название и Enter / «Найти», либо выберите подсказку. Сейчас:{" "}
             <strong>{form.default_city}</strong> ({form.default_lat.toFixed(4)},{" "}
-            {form.default_lon.toFixed(4)})
+            {form.default_lon.toFixed(4)}). Поиск адресов и объектов ограничен радиусом{" "}
+            <strong>50 км</strong> вокруг этого города.
           </div>
         </div>
 
@@ -237,19 +370,38 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
             <option value="osm">OpenStreetMap (без ключа, запасной)</option>
           </select>
           <div className="muted">
-            Для Яндекса: ключ с developer.tech.yandex.ru (JavaScript API и HTTP Геокодер). Для
-            2ГИС: platform.2gis.ru. Без ключа карта не загрузится — переключитесь на OSM
-            временно.
+            Без ключа Яндекса/2ГИС карта не загрузится — временно переключитесь на OSM, чтобы
+            работать с ИППВ.
           </div>
         </div>
 
         <div className="field">
-          <label>API-ключ Яндекс (необязательно)</label>
-          <input
-            value={form.yandex_api_key}
-            onChange={(e) => setForm({ ...form, yandex_api_key: e.target.value })}
-            placeholder="для карт и поиска адреса Яндекса"
-          />
+          <label>API-ключ Яндекс</label>
+          <div className="row">
+            <input
+              value={form.yandex_api_key}
+              onChange={(e) => setForm({ ...form, yandex_api_key: e.target.value })}
+              placeholder="вставьте ключ и нажмите «Сохранить»"
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <button className="btn primary" type="submit" disabled={busy}>
+              Сохранить
+            </button>
+          </div>
+          <div className="muted">
+            Сервис на developer.tech.yandex.ru: <strong>«JavaScript API и HTTP Геокодер»</strong>.
+            После сохранения откройте вкладку «Карта». Если карта пустая — проверьте, что у ключа
+            разрешён этот сервис и нет ограничений по HTTP Referer.
+          </div>
+          {form.yandex_api_key.trim() ? (
+            <div className="status-banner ok">
+              Ключ введён ({form.yandex_api_key.trim().length} символов)
+              {dirty ? " — ещё не сохранён" : " — сохранён в настройках"}
+            </div>
+          ) : (
+            <div className="status-banner warn">Ключ не введён</div>
+          )}
         </div>
 
         <div className="field">
@@ -258,6 +410,8 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
             value={form.dgis_api_key}
             onChange={(e) => setForm({ ...form, dgis_api_key: e.target.value })}
             placeholder="для карт 2ГИС"
+            spellCheck={false}
+            autoComplete="off"
           />
         </div>
 
@@ -265,16 +419,15 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed }: Props) {
           <button className="btn primary" type="submit" disabled={busy}>
             Сохранить
           </button>
+          {onOpenMap && (
+            <button type="button" className="btn" onClick={onOpenMap}>
+              Перейти к карте
+            </button>
+          )}
         </div>
 
-        {message && (
-          <div className="status-banner" style={{ whiteSpace: "pre-wrap" }}>
-            {message}
-          </div>
-        )}
-
         <div className="status-banner">
-          Индекс: ВО {stats?.water_points ?? 0}, карточек {stats?.cards ?? 0}, источников{" "}
+          Индекс: ИППВ {stats?.water_points ?? 0}, карточек {stats?.cards ?? 0}, источников{" "}
           {stats?.sources ?? 0}
           {stats?.last_indexed_at ? ` · ${stats.last_indexed_at}` : ""}
         </div>

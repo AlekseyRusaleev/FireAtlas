@@ -65,7 +65,6 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <strong>Пожарный Атлас</strong>
-          <span>оперативный поиск водоисточников</span>
         </div>
         <nav className="tabs">
           <button className={`tab ${tab === "map" ? "active" : ""}`} onClick={() => setTab("map")}>
@@ -75,7 +74,7 @@ export default function App() {
             className={`tab ${tab === "cards" ? "active" : ""}`}
             onClick={() => setTab("cards")}
           >
-            Карточки тушения
+            Информационные карточки
           </button>
           <button
             className={`tab ${tab === "settings" ? "active" : ""}`}
@@ -86,7 +85,7 @@ export default function App() {
         </nav>
         <div className="topbar-stats">
           {stats
-            ? `ВО: ${stats.water_points} · Карточки: ${stats.cards} · Источники: ${stats.sources}`
+            ? `ИППВ: ${stats.water_points} · Карточки: ${stats.cards} · Источники: ${stats.sources}`
             : "Нет данных индекса"}
         </div>
       </header>
@@ -115,6 +114,7 @@ export default function App() {
             onReindexed={async () => {
               await refresh();
             }}
+            onOpenMap={() => setTab("map")}
           />
         )}
       </main>

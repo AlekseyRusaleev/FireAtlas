@@ -1,6 +1,7 @@
 mod db;
 mod indexer;
 mod kml;
+mod markers;
 mod settings;
 
 use db::Db;
@@ -143,6 +144,40 @@ pub struct CardDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserMarkerDto {
+    pub id: i64,
+    pub name: String,
+    pub comment: Option<String>,
+    pub lat: f64,
+    pub lon: f64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkerFileInfo {
+    pub path: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkersState {
+    pub markers: Vec<UserMarkerDto>,
+    pub file: Option<MarkerFileInfo>,
+    pub file_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceDto {
+    pub id: i64,
+    pub path: String,
+    pub kind: String,
+    pub mtime: i64,
+    pub status: String,
+    pub point_count: i64,
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NearbyPoint {
     pub id: i64,
     pub name: String,
@@ -267,7 +302,7 @@ async fn import_kmz_files(
             errors: vec![],
             last_indexed_at: stats.last_indexed_at,
             hint: format!(
-                "Импортировано файлов: {n}. Водоисточников в индексе: {}.",
+                "Импортировано файлов: {n}. ИППВ в индексе: {}.",
                 stats.water_points
             ),
         })
@@ -373,28 +408,104 @@ fn get_favorites(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<SearchHit
     state.db.lock().get_favorites()
 }
 
+/// Отдаёт метки из БД и, при необходимости, обновляет KML-файл рядом с базой.
+/// Блокировки берём по очереди: parking_lot::Mutex не реентрантный.
+fn markers_state(state: &AppState, force_write: bool) -> Result<MarkersState, String> {
+    let list = state.db.lock().list_user_markers()?;
+    let data_path = state.settings.lock().data_path.clone();
+
+    let Some(path) = markers::markers_file_path(&data_path) else {
+        return Ok(MarkersState {
+            markers: list,
+            file: None,
+            file_error: None,
+        });
+    };
+
+    // При обычном чтении файл не перезаписываем — только восстанавливаем, если он исчез.
+    // Метка уже в базе, поэтому недоступный сетевой диск не должен ломать сохранение.
+    let mut file_error = None;
+    if force_write || (!path.exists() && !list.is_empty()) {
+        if let Err(e) = markers::write_markers_kml(&path, &list) {
+            file_error = Some(e);
+        }
+    }
+
+    Ok(MarkersState {
+        file: Some(MarkerFileInfo {
+            path: path.display().to_string(),
+            count: list.len(),
+        }),
+        markers: list,
+        file_error,
+    })
+}
+
+#[tauri::command]
+fn list_sources(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<SourceDto>, String> {
+    state.db.lock().list_sources()
+}
+
+#[tauri::command]
+fn delete_source(
+    state: tauri::State<'_, Arc<AppState>>,
+    id: i64,
+) -> Result<Vec<SourceDto>, String> {
+    state.db.lock().delete_source(id)?;
+    state.db.lock().list_sources()
+}
+
+#[tauri::command]
+fn list_markers(state: tauri::State<'_, Arc<AppState>>) -> Result<MarkersState, String> {
+    markers_state(&state, true)
+}
+
+#[tauri::command]
+fn add_marker(
+    state: tauri::State<'_, Arc<AppState>>,
+    name: String,
+    comment: Option<String>,
+    lat: f64,
+    lon: f64,
+) -> Result<MarkersState, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Укажите название метки".into());
+    }
+    if !lat.is_finite() || !lon.is_finite() {
+        return Err("Некорректные координаты метки".into());
+    }
+    let comment = comment
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
+    let created_at = chrono::Local::now().to_rfc3339();
+
+    state
+        .db
+        .lock()
+        .add_user_marker(name, comment.as_deref(), lat, lon, &created_at)?;
+
+    markers_state(&state, true)
+}
+
+#[tauri::command]
+fn delete_marker(
+    state: tauri::State<'_, Arc<AppState>>,
+    id: i64,
+) -> Result<MarkersState, String> {
+    state.db.lock().delete_user_marker(id)?;
+    markers_state(&state, true)
+}
+
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     if !p.exists() {
         return Err(format!("Файл не найден (облако не скачало?): {path}"));
     }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-        // `start` correctly uses file associations (Word/Visio/etc.)
-        Command::new("cmd")
-            .args(["/C", "start", "", &path])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .spawn()
-            .map_err(|e| format!("не удалось открыть: {e}"))?;
-        return Ok(());
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        open::that(&path).map_err(|e| format!("open failed: {e}"))
-    }
+    // ShellExecuteExW принимает путь как UTF-16, поэтому кириллица, кавычки и
+    // сетевые диски (Z:) не искажаются — в отличие от `cmd /C start`.
+    open::that_detached(&p).map_err(|e| format!("не удалось открыть «{path}»: {e}"))
 }
 
 #[tauri::command]
@@ -410,21 +521,8 @@ fn open_folder(path: String) -> Result<(), String> {
     if !folder.exists() {
         return Err(format!("Папка не найдена: {}", folder.display()));
     }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-        Command::new("explorer")
-            .arg(folder.as_os_str())
-            .creation_flags(0x08000000)
-            .spawn()
-            .map_err(|e| format!("explorer: {e}"))?;
-        return Ok(());
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        open::that(folder).map_err(|e| format!("open folder: {e}"))
-    }
+    open::that_detached(&folder)
+        .map_err(|e| format!("не удалось открыть папку «{}»: {e}", folder.display()))
 }
 
 #[tauri::command]
@@ -469,6 +567,8 @@ pub fn run() {
             get_stats,
             reindex,
             import_kmz_files,
+            list_sources,
+            delete_source,
             search,
             get_water_in_bounds,
             get_water_point,
@@ -479,6 +579,9 @@ pub fn run() {
             get_history,
             toggle_favorite,
             get_favorites,
+            list_markers,
+            add_marker,
+            delete_marker,
             open_path,
             open_folder,
             read_file_base64,

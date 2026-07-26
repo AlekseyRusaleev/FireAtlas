@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useEffect, useRef } from "react";
-import type { WaterPoint } from "../../shared/types";
+import { useEffect, useRef, useState } from "react";
+import type { UserMarker, WaterPoint } from "../../shared/types";
+import type { SearchPin } from "./YandexMapView";
 
 function loadScript(src: string, id: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -31,31 +32,55 @@ interface Props {
   apiKey: string;
   center: [number, number];
   zoom: number;
+  focusZoom?: number;
   points: WaterPoint[];
   focusId: number | null;
+  searchPin?: SearchPin | null;
+  markers?: UserMarker[];
+  pickMode?: boolean;
   onBoundsChange: (b: { south: number; west: number; north: number; east: number }) => void;
   onPointClick: (p: WaterPoint) => void;
+  onMapPick?: (lat: number, lon: number) => void;
+  onMarkerClick?: (marker: UserMarker) => void;
 }
 
 export function DgisMapView({
   apiKey,
   center,
   zoom,
+  focusZoom = 15,
   points,
   focusId,
+  searchPin = null,
+  markers = [],
+  pickMode = false,
   onBoundsChange,
   onPointClick,
+  onMapPick,
+  onMarkerClick,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const [mapReady, setMapReady] = useState(false);
   const mapRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
+  const userMarkersRef = useRef<any[]>([]);
+  const pinRef = useRef<any>(null);
+  const focusZoomRef = useRef(focusZoom);
+  const pickModeRef = useRef(pickMode);
+  focusZoomRef.current = focusZoom;
   const onBoundsChangeRef = useRef(onBoundsChange);
   const onPointClickRef = useRef(onPointClick);
+  const onMapPickRef = useRef(onMapPick);
+  const onMarkerClickRef = useRef(onMarkerClick);
+  pickModeRef.current = pickMode;
   onBoundsChangeRef.current = onBoundsChange;
   onPointClickRef.current = onPointClick;
+  onMapPickRef.current = onMapPick;
+  onMarkerClickRef.current = onMarkerClick;
 
   useEffect(() => {
     let destroyed = false;
+    setMapReady(false);
     if (!apiKey || !hostRef.current) return;
 
     void (async () => {
@@ -70,6 +95,7 @@ export function DgisMapView({
           zoomControl: true,
         });
         mapRef.current = map;
+        setMapReady(true);
 
         const emit = () => {
           const z = map.getZoom();
@@ -83,6 +109,11 @@ export function DgisMapView({
           });
         };
         map.on("moveend", emit);
+        map.on("click", (e: any) => {
+          if (!pickModeRef.current) return;
+          const lngLat = e?.lngLat;
+          if (lngLat) onMapPickRef.current?.(Number(lngLat[1]), Number(lngLat[0]));
+        });
         emit();
       } catch (e) {
         console.error(e);
@@ -91,14 +122,16 @@ export function DgisMapView({
 
     return () => {
       destroyed = true;
-      markersRef.current.forEach((m) => {
+      [...markersRef.current, ...userMarkersRef.current, pinRef.current].forEach((m) => {
         try {
-          m.destroy();
+          m?.destroy();
         } catch {
           /* ignore */
         }
       });
       markersRef.current = [];
+      userMarkersRef.current = [];
+      pinRef.current = null;
       try {
         mapRef.current?.destroy();
       } catch {
@@ -113,7 +146,7 @@ export function DgisMapView({
     const map = mapRef.current;
     if (!map) return;
     map.setCenter([center[1], center[0]]);
-    map.setZoom(Math.max(map.getZoom(), 15));
+    map.setZoom(Math.max(map.getZoom(), focusZoomRef.current));
   }, [center]);
 
   useEffect(() => {
@@ -130,7 +163,41 @@ export function DgisMapView({
       marker.on("click", () => onPointClickRef.current(p));
       markersRef.current.push(marker);
     }
-  }, [points, focusId]);
+  }, [points, focusId, mapReady]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const mapgl = (window as any).mapgl;
+    if (!map || !mapgl) return;
+    userMarkersRef.current.forEach((m) => m.destroy());
+    userMarkersRef.current = [];
+    for (const m of markers) {
+      const marker = new mapgl.Marker(map, {
+        coordinates: [m.lon, m.lat],
+        label: { text: m.name },
+      });
+      marker.on("click", () => onMarkerClickRef.current?.(m));
+      userMarkersRef.current.push(marker);
+    }
+  }, [markers, mapReady]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const mapgl = (window as any).mapgl;
+    if (!map || !mapgl) return;
+    try {
+      pinRef.current?.destroy();
+    } catch {
+      /* ignore */
+    }
+    pinRef.current = null;
+    if (!searchPin) return;
+    pinRef.current = new mapgl.Marker(map, {
+      coordinates: [searchPin.lon, searchPin.lat],
+      label: { text: searchPin.label },
+      zIndex: 1000,
+    });
+  }, [searchPin, mapReady]);
 
   if (!apiKey) {
     return (

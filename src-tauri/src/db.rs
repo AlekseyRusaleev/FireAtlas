@@ -1,4 +1,4 @@
-use crate::{CardDto, CardFileDto, IndexStats, NearbyPoint, SearchHit, WaterPointDto};
+use crate::{CardDto, CardFileDto, IndexStats, NearbyPoint, SearchHit, UserMarkerDto, WaterPointDto};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
@@ -83,6 +83,15 @@ impl Db {
                   ref_id INTEGER NOT NULL,
                   title TEXT NOT NULL,
                   opened_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS user_markers (
+                  id INTEGER PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  comment TEXT,
+                  lat REAL NOT NULL,
+                  lon REAL NOT NULL,
+                  created_at TEXT NOT NULL
                 );
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS water_points_fts USING fts5(
@@ -424,7 +433,7 @@ impl Db {
                     kind: "card".into(),
                     title,
                     subtitle: if subtitle.is_empty() {
-                        "Карточка тушения".into()
+                        "Информационная карточка".into()
                     } else {
                         subtitle
                     },
@@ -467,7 +476,7 @@ impl Db {
             );
             sql.push(')');
         }
-        sql.push_str(" LIMIT 5000");
+        sql.push_str(" LIMIT 1200");
 
         let mut stmt = self.conn.prepare(&sql).map_err(|e| e.to_string())?;
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![
@@ -764,6 +773,102 @@ impl Db {
             out.push(row.map_err(|e| e.to_string())?);
         }
         Ok(out)
+    }
+
+    pub fn list_sources(&self) -> Result<Vec<crate::SourceDto>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.id, s.path, s.kind, s.mtime, s.status,
+                        (SELECT COUNT(*) FROM water_points w WHERE w.source_id = s.id)
+                 FROM sources s
+                 ORDER BY s.path",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                let path: String = r.get(1)?;
+                let file_name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&path)
+                    .to_string();
+                Ok(crate::SourceDto {
+                    id: r.get(0)?,
+                    path,
+                    kind: r.get(2)?,
+                    mtime: r.get(3)?,
+                    status: r.get(4)?,
+                    point_count: r.get(5)?,
+                    file_name,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_source(&self, id: i64) -> Result<(), String> {
+        self.clear_source_points(id)?;
+        self.conn
+            .execute("DELETE FROM sources WHERE id=?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn add_user_marker(
+        &self,
+        name: &str,
+        comment: Option<&str>,
+        lat: f64,
+        lon: f64,
+        created_at: &str,
+    ) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO user_markers(name, comment, lat, lon, created_at)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![name, comment, lat, lon, created_at],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_user_markers(&self) -> Result<Vec<UserMarkerDto>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, name, comment, lat, lon, created_at
+                 FROM user_markers ORDER BY created_at DESC, id DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(UserMarkerDto {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    comment: r.get(2)?,
+                    lat: r.get(3)?,
+                    lon: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_user_marker(&self, id: i64) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM user_markers WHERE id=?1", params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 
