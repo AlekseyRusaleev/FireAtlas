@@ -305,6 +305,18 @@ pub fn import_map_files(db: &mut Db, data_root: &Path, files: &[PathBuf]) -> Res
     Ok(imported)
 }
 
+/// Collect .kml/.kmz from an arbitrary folder (e.g. Downloads), depth ≤ 4.
+pub fn collect_map_files_flat(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if !dir.is_dir() {
+        return files;
+    }
+    collect_under(dir, 4, &mut files);
+    files.sort();
+    files.dedup();
+    files
+}
+
 fn index_card_folder(db: &mut Db, folder: &Path) -> Result<(), String> {
     let title = folder
         .file_name()

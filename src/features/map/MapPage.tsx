@@ -10,6 +10,7 @@ import { hasReadableText, sanitizeDescription } from "../../shared/html";
 import {
   WATER_TYPE_SHORT,
   type AppSettings,
+  type MapPackageInfo,
   type MarkerFileInfo,
   type MarkersState,
   type NearbyPoint,
@@ -18,9 +19,8 @@ import {
   type WaterPoint,
   type WaterType,
 } from "../../shared/types";
-import { YandexMapView, type SearchPin } from "./YandexMapView";
-import { DgisMapView } from "./DgisMapView";
 import { LocalMapView } from "./LocalMapView";
+import type { SearchPin } from "./YandexMapView";
 import { distanceKm, geocodeAddress } from "./geocode";
 
 L.Icon.Default.mergeOptions({
@@ -45,6 +45,42 @@ function isLikelyAddress(query: string): boolean {
       query
     )
   );
+}
+
+/** Нормализация адреса карточки для геокодера (п-т. → проспект и т.п.). */
+function normalizeAddressForGeocode(raw: string, city?: string): string {
+  let s = raw.trim();
+  s = s
+    .replace(/\bп-?т\.?\b/gi, "проспект")
+    .replace(/\bпр-?т\.?\b/gi, "проспект")
+    .replace(/\bпр\.?\b/gi, "проспект")
+    .replace(/\bул\.?\b/gi, "улица")
+    .replace(/\bпер\.?\b/gi, "переулок")
+    .replace(/\bнаб\.?\b/gi, "набережная")
+    .replace(/\bпл\.?\b/gi, "площадь")
+    .replace(/\bмкр\.?\b/gi, "микрорайон")
+    .replace(/\s+/g, " ")
+    .trim();
+  const cityName = city?.trim();
+  if (cityName && !s.toLowerCase().includes(cityName.toLowerCase())) {
+    s = `${s}, ${cityName}`;
+  }
+  return s;
+}
+
+/** Достаём хвост адреса из названия папки ИК. */
+function addressFromCardTitle(title: string): string | null {
+  const byComma = title.split(",").map((x) => x.trim()).filter(Boolean);
+  if (byComma.length >= 2) {
+    const tail = byComma.slice(-2).join(", ");
+    if (tail.length > 5) return tail;
+  }
+  const guillemet = title.lastIndexOf("»");
+  if (guillemet >= 0) {
+    const tail = title.slice(guillemet + 1).replace(/^[\s,]+/, "").trim();
+    if (tail.length > 5) return tail;
+  }
+  return null;
 }
 
 function typeColor(t: WaterType): string {
@@ -188,8 +224,9 @@ export function MapPage({ settings, onOpenCard }: Props) {
     settings.default_lat,
     settings.default_lon,
   ]);
-  const [focusZoom, setFocusZoom] = useState(15);
+  const [focusZoom, setFocusZoom] = useState(settings.default_zoom || 13);
   const [focusId, setFocusId] = useState<number | null>(null);
+  const [localPack, setLocalPack] = useState<MapPackageInfo | null>(null);
   const [history, setHistory] = useState<SearchHit[]>([]);
   const [favorites, setFavorites] = useState<SearchHit[]>([]);
   const [sideMode, setSideMode] = useState<SideMode>("search");
@@ -208,7 +245,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
   const [markerError, setMarkerError] = useState<string | null>(null);
   const draftNameRef = useRef<HTMLInputElement>(null);
 
-  const provider = settings.map_provider || "yandex";
+  const useLocalMap = Boolean(settings.local_map_path);
   const sideList =
     sideMode === "search" ? hits : sideMode === "history" ? history : sideMode === "favorites" ? favorites : [];
   const description = useMemo(() => {
@@ -232,6 +269,26 @@ export function MapPage({ settings, onOpenCard }: Props) {
   useEffect(() => {
     void refreshLists();
   }, []);
+
+  useEffect(() => {
+    if (!useLocalMap || !settings.local_map_path) {
+      setLocalPack(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const packs = await api.listMapPackages();
+        const match =
+          packs.find((p) => p.path === settings.local_map_path) ||
+          packs.find((p) => p.id === settings.local_map_city_id) ||
+          packs.find((p) => p.ready) ||
+          null;
+        setLocalPack(match);
+      } catch {
+        setLocalPack(null);
+      }
+    })();
+  }, [useLocalMap, settings.local_map_path, settings.local_map_city_id]);
 
   useEffect(() => {
     void (async () => {
@@ -302,12 +359,12 @@ export function MapPage({ settings, onOpenCard }: Props) {
     setCenter([lat, lon]);
   }
 
-  async function selectHit(hit: SearchHit) {
+  async function selectHit(hit: SearchHit, fallbackQuery?: string) {
     setSelected(hit);
     setGeoError(null);
     // Сразу двигаем карту по координатам из результата (Enter / клик).
     if (hit.lat != null && hit.lon != null) {
-      moveTo(hit.lat, hit.lon);
+      moveTo(hit.lat, hit.lon, hit.kind === "card" ? ADDRESS_ZOOM : 15);
       if (hit.kind === "water") setFocusId(hit.id);
     }
     await api.addHistory(hit.kind, hit.id, hit.title);
@@ -320,37 +377,103 @@ export function MapPage({ settings, onOpenCard }: Props) {
         setFocusId(wp.id);
         setNearby(await api.nearby(wp.lat, wp.lon, 8, ALL_TYPES));
       }
-    } else {
-      setWater(null);
-      const card = await api.getCard(hit.id);
-      if (card?.lat != null && card.lon != null) {
-        moveTo(card.lat, card.lon);
-        setNearby(await api.nearby(card.lat, card.lon, 8, ALL_TYPES));
-      } else {
-        setNearby([]);
+      return;
+    }
+
+    setWater(null);
+    setFocusId(null);
+    const card = await api.getCard(hit.id);
+    if (card?.lat != null && card.lon != null) {
+      moveTo(card.lat, card.lon, ADDRESS_ZOOM);
+      setNearby(await api.nearby(card.lat, card.lon, 8, ALL_TYPES));
+      return;
+    }
+
+    // Привязка к адресу: пробуем несколько вариантов строки для геокодера
+    const candidates = [
+      card?.address,
+      hit.address,
+      addressFromCardTitle(card?.title || hit.title),
+      fallbackQuery?.trim(),
+      query.trim(),
+    ]
+      .filter((x): x is string => !!x && x.trim().length > 3)
+      .map((x) => normalizeAddressForGeocode(x, settings.default_city));
+
+    const unique = [...new Set(candidates)];
+    let lastErr = "Адрес карточки не удалось показать на карте";
+    for (const addr of unique) {
+      try {
+        const found = await geocodeAddress(addr, settings.yandex_api_key, {
+          lat: settings.default_lat,
+          lon: settings.default_lon,
+          city: settings.default_city,
+          radiusKm: SEARCH_RADIUS_KM,
+        });
+        const num = card?.number ? ` №${card.number}` : "";
+        setSearchPin({
+          ...found,
+          label: `ИК${num}: ${found.label}`,
+        });
+        moveTo(found.lat, found.lon, ADDRESS_ZOOM);
+        setNearby(await api.nearby(found.lat, found.lon, 8, ALL_TYPES));
+        setGeoError(null);
+        return;
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : String(e);
       }
     }
+    setNearby([]);
+    setGeoError(
+      `Карточка выбрана, но на карту не перешли: ${lastErr}. Проверьте интернет или уточните адрес.`
+    );
   }
 
-  /** Геокодирование: переносим карту на адрес и подсвечиваем его отдельной меткой. */
+  /** Геокодирование + подбор информационной карточки по адресу. */
   async function findAddress(text: string) {
     const q = text.trim();
     if (!q) return;
     setGeoBusy(true);
     setGeoError(null);
     try {
-      const found = await geocodeAddress(q, settings.yandex_api_key, {
-        lat: settings.default_lat,
-        lon: settings.default_lon,
-        city: settings.default_city,
-        radiusKm: SEARCH_RADIUS_KM,
-      });
+      const indexed = await api.search(q, ALL_TYPES, 80);
+      const cards = indexed.filter((h) => h.kind === "card");
+      if (cards.length > 0) {
+        setHits(indexed.slice(0, 40));
+        setActiveIndex(0);
+        setSideMode("search");
+        await selectHit(cards[0], q);
+        return;
+      }
+
+      const found = await geocodeAddress(
+        normalizeAddressForGeocode(q, settings.default_city),
+        settings.yandex_api_key,
+        {
+          lat: settings.default_lat,
+          lon: settings.default_lon,
+          city: settings.default_city,
+          radiusKm: SEARCH_RADIUS_KM,
+        }
+      );
       setSearchPin(found);
-      setSelected(null);
-      setWater(null);
       setFocusId(null);
       moveTo(found.lat, found.lon, ADDRESS_ZOOM);
       setNearby(await api.nearby(found.lat, found.lon, 8, ALL_TYPES));
+
+      const byAddr = (await api.search(found.label, ALL_TYPES, 40)).filter(
+        (h) => h.kind === "card"
+      );
+      if (byAddr.length > 0) {
+        const rest = indexed.filter((h) => h.kind !== "card");
+        setHits([...byAddr, ...rest].slice(0, 40));
+        setActiveIndex(0);
+        await selectHit(byAddr[0], found.label);
+      } else {
+        setSelected(null);
+        setWater(null);
+        setHits(indexed.slice(0, 40));
+      }
     } catch (e) {
       setSearchPin(null);
       setGeoError(e instanceof Error ? e.message : String(e));
@@ -375,11 +498,14 @@ export function MapPage({ settings, onOpenCard }: Props) {
     if (e.key === "Enter") {
       e.preventDefault();
       const hit = sideList[activeIndex] ?? sideList[0];
-      // Явный адрес геокодируем; объект индекса всегда можно выбрать кликом/стрелками.
+      if (hit?.kind === "card") {
+        void selectHit(hit, query);
+        return;
+      }
       if (sideMode === "search" && (isLikelyAddress(query) || !hit)) {
         void findAddress(query);
       } else if (hit) {
-        void selectHit(hit);
+        void selectHit(hit, query);
       }
     }
   }
@@ -445,24 +571,6 @@ export function MapPage({ settings, onOpenCard }: Props) {
       lon: n.lon,
     });
   }
-
-  const mapProps = {
-    center,
-    zoom: settings.default_zoom,
-    focusZoom,
-    points,
-    focusId,
-    searchPin,
-    markers,
-    pickMode,
-    onBoundsChange: onBoundsChangeDebounced,
-    onPointClick,
-    onMapPick: (lat: number, lon: number) => startDraft(lat, lon),
-    onMarkerClick: (m: UserMarker) => {
-      setSideMode("markers");
-      moveTo(m.lat, m.lon, 16);
-    },
-  };
 
   return (
     <div className="panel map-layout">
@@ -634,12 +742,20 @@ export function MapPage({ settings, onOpenCard }: Props) {
                     ? "active"
                     : ""
                 }`}
-                onClick={() => void selectHit(hit)}
+                onClick={() => void selectHit(hit, query)}
                 onMouseEnter={() => setActiveIndex(index)}
+                onDoubleClick={() => {
+                  void selectHit(hit, query);
+                  if (hit.kind === "card") onOpenCard(hit.id);
+                }}
               >
                 <div className="title">
                   <span className={`badge ${hit.kind === "card" ? "card" : hit.water_type || ""}`}>
-                    {hit.kind === "card" ? "Карточка" : WATER_TYPE_SHORT[hit.water_type || "other"]}
+                    {hit.kind === "card"
+                      ? hit.subtitle.startsWith("№")
+                        ? hit.subtitle.split(" · ")[0]
+                        : "Карточка"
+                      : WATER_TYPE_SHORT[hit.water_type || "other"]}
                   </span>
                   {hit.title}
                 </div>
@@ -672,26 +788,22 @@ export function MapPage({ settings, onOpenCard }: Props) {
           {pickMode && <span className="map-toolbar-hint">Щёлкните по карте</span>}
         </div>
 
-        {provider === "yandex" && (
-          <YandexMapView apiKey={settings.yandex_api_key} {...mapProps} />
-        )}
-        {provider === "dgis" && <DgisMapView apiKey={settings.dgis_api_key} {...mapProps} />}
-        {provider === "local" && (
+        {useLocalMap ? (
           <LocalMapView
             packagePath={settings.local_map_path}
-            minZoom={11}
-            maxZoom={15}
+            nativeMinZoom={localPack?.min_zoom || 12}
+            nativeMaxZoom={localPack?.max_zoom || 14}
             center={center}
             zoom={focusZoom || settings.default_zoom}
             points={points}
             focusId={focusId}
+            searchPin={searchPin}
             onBoundsChange={onBoundsChangeDebounced}
             onPointClick={onPointClick}
           />
-        )}
-        {provider === "osm" && (
+        ) : (
           <MapContainer
-            center={[settings.default_lat, settings.default_lon]}
+            center={[settings.default_lat || 55.75, settings.default_lon || 37.62]}
             zoom={settings.default_zoom}
             zoomControl
             style={{ width: "100%", height: "100%" }}

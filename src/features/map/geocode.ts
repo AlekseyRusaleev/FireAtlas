@@ -49,8 +49,8 @@ export function distanceKm(lat1: number, lon1: number, lat2: number, lon2: numbe
 }
 
 /**
- * Ищет адрес в радиусе города по умолчанию: сначала через JS API Яндекса,
- * затем через HTTP-геокодер. Встроенный searchControl не используется.
+ * Ищет адрес в радиусе города: Яндекс JS → Яндекс HTTP → Photon → Nominatim.
+ * Работает и без ключа Яндекса (через Photon/Nominatim).
  */
 export async function geocodeAddress(
   query: string,
@@ -62,9 +62,10 @@ export async function geocodeAddress(
 
   const radiusKm = bias?.radiusKm ?? DEFAULT_RADIUS_KM;
   const city = bias?.city?.trim();
-  // Мягкий bias: если в запросе нет названия города — добавляем его.
   const biasedQuery =
     city && !q.toLowerCase().includes(city.toLowerCase()) ? `${q}, ${city}` : q;
+
+  const errors: string[] = [];
 
   const viaJsApi = await geocodeViaJsApi(biasedQuery, bias, radiusKm);
   if (viaJsApi) {
@@ -72,12 +73,44 @@ export async function geocodeAddress(
     return viaJsApi;
   }
 
-  if (!apiKey.trim()) {
-    throw new Error(`Поиск адреса недоступен без ключа Яндекса. ${KEY_HINT}`);
+  if (apiKey.trim()) {
+    try {
+      const viaHttp = await geocodeViaHttp(biasedQuery, apiKey, bias, radiusKm);
+      assertWithinRadius(viaHttp, bias, radiusKm);
+      return viaHttp;
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : String(e));
+    }
   }
-  const viaHttp = await geocodeViaHttp(biasedQuery, apiKey, bias, radiusKm);
-  assertWithinRadius(viaHttp, bias, radiusKm);
-  return viaHttp;
+
+  try {
+    const viaPhoton = await geocodeViaPhoton(biasedQuery, bias, radiusKm);
+    if (viaPhoton) {
+      assertWithinRadius(viaPhoton, bias, radiusKm);
+      return viaPhoton;
+    }
+  } catch (e) {
+    errors.push(e instanceof Error ? e.message : String(e));
+  }
+
+  try {
+    const viaNominatim = await geocodeViaNominatim(biasedQuery, bias, radiusKm);
+    if (viaNominatim) {
+      assertWithinRadius(viaNominatim, bias, radiusKm);
+      return viaNominatim;
+    }
+  } catch (e) {
+    errors.push(e instanceof Error ? e.message : String(e));
+  }
+
+  const hint = apiKey.trim()
+    ? errors.slice(0, 2).join(" · ")
+    : `Без ключа Яндекса поиск идёт через открытые сервисы. ${KEY_HINT}`;
+  throw new Error(
+    bias
+      ? `Адрес не найден в радиусе ${radiusKm} км от ${bias.city || "города"}: «${q}». ${hint}`
+      : `Адрес не найден: «${q}». ${hint}`
+  );
 }
 
 function assertWithinRadius(result: GeocodeResult, bias: GeocodeBias | undefined, radiusKm: number) {
@@ -105,7 +138,6 @@ async function geocodeViaJsApi(
         [b.south, b.west],
         [b.north, b.east],
       ];
-      // Жёстко: не уводить поиск в другой регион.
       opts.strictBounds = true;
     }
     const res = await ymaps.geocode(q, opts);
@@ -134,7 +166,6 @@ async function geocodeViaHttp(
 
   if (bias) {
     const b = boundsAround(bias.lat, bias.lon, radiusKm);
-    // ll + spn: центр и размер окна поиска (долгота,широта).
     url += `&ll=${bias.lon},${bias.lat}&spn=${b.dLon * 2},${b.dLat * 2}&rspn=1`;
   }
 
@@ -173,4 +204,78 @@ async function geocodeViaHttp(
   const label =
     geoObject.metaDataProperty?.GeocoderMetaData?.text || geoObject.name || q;
   return { lat, lon, label: String(label) };
+}
+
+/** Photon (Komoot) — без ключа, удобен из WebView. */
+async function geocodeViaPhoton(
+  q: string,
+  bias: GeocodeBias | undefined,
+  radiusKm: number
+): Promise<GeocodeResult | null> {
+  let url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=ru`;
+  if (bias) {
+    url += `&lat=${bias.lat}&lon=${bias.lon}`;
+  }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Photon: HTTP ${res.status}`);
+  const data = await res.json();
+  const features: any[] = data?.features || [];
+  if (!features.length) return null;
+
+  type Cand = GeocodeResult & { km: number };
+  const cands: Cand[] = [];
+  for (const f of features) {
+    const coords = f?.geometry?.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) continue;
+    const lon = Number(coords[0]);
+    const lat = Number(coords[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const p = f.properties || {};
+    const parts = [p.name, p.street, p.housenumber, p.city || p.town || p.village, p.state]
+      .filter(Boolean)
+      .map(String);
+    const label = parts.length ? parts.join(", ") : q;
+    const km = bias ? distanceKm(bias.lat, bias.lon, lat, lon) : 0;
+    if (bias && km > radiusKm * 1.15) continue;
+    cands.push({ lat, lon, label, km });
+  }
+  if (!cands.length) return null;
+  cands.sort((a, b) => a.km - b.km);
+  return { lat: cands[0].lat, lon: cands[0].lon, label: cands[0].label };
+}
+
+async function geocodeViaNominatim(
+  q: string,
+  bias: GeocodeBias | undefined,
+  radiusKm: number
+): Promise<GeocodeResult | null> {
+  let url =
+    "https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=0&countrycodes=ru" +
+    `&q=${encodeURIComponent(q)}`;
+  if (bias) {
+    const b = boundsAround(bias.lat, bias.lon, radiusKm);
+    url += `&viewbox=${b.west},${b.north},${b.east},${b.south}&bounded=1`;
+  }
+  const res = await fetch(url, {
+    headers: { Accept: "application/json", "Accept-Language": "ru" },
+  });
+  if (!res.ok) throw new Error(`Nominatim: HTTP ${res.status}`);
+  const items: any[] = await res.json();
+  if (!Array.isArray(items) || !items.length) return null;
+
+  for (const item of items) {
+    const lat = Number(item.lat);
+    const lon = Number(item.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    if (bias) {
+      const km = distanceKm(bias.lat, bias.lon, lat, lon);
+      if (km > radiusKm * 1.15) continue;
+    }
+    return {
+      lat,
+      lon,
+      label: String(item.display_name || q),
+    };
+  }
+  return null;
 }

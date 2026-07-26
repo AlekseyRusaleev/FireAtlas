@@ -5,7 +5,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
@@ -103,17 +102,135 @@ pub fn cities() -> Vec<MapCity> {
 
 pub fn find_city(id_or_name: &str) -> Option<MapCity> {
     let q = id_or_name.trim().to_lowercase();
-    cities().into_iter().find(|c| {
-        c.id == q || c.name.to_lowercase() == q || c.name.to_lowercase().contains(&q)
+    if q.is_empty() {
+        return None;
+    }
+    let all = cities();
+    if let Some(c) = all.iter().find(|c| c.id == q || c.name.to_lowercase() == q) {
+        return Some(c.clone());
+    }
+    // Prefix match only for longer queries — avoid "ск" → random city / Кемерово
+    if q.chars().count() >= 4 {
+        if let Some(c) = all
+            .iter()
+            .find(|c| c.name.to_lowercase().starts_with(&q) || c.id.starts_with(&q))
+        {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn slugify(name: &str, lat: f64, lon: f64) -> String {
+    let cleaned: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'а'..='я' | 'ё' | 'a'..='z' | '0'..='9' => c,
+            ' ' | '-' | '_' | '.' => '_',
+            _ => '_',
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .chars()
+        .take(48)
+        .collect();
+    if cleaned.is_empty() {
+        format!(
+            "city_{}_{}",
+            format!("{lat:.4}").replace('.', "p"),
+            format!("{lon:.4}").replace('.', "p")
+        )
+    } else {
+        cleaned
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct NominatimHit {
+    lat: String,
+    lon: String,
+    display_name: String,
+}
+
+/// Resolve a free-typed city name (known list first, then Nominatim via curl).
+pub fn resolve_city_query(query: &str, radius_km: Option<f64>) -> Result<MapCity, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Err("Введите название города".into());
+    }
+    let r = radius_km.unwrap_or(16.0).clamp(5.0, 35.0);
+
+    if let Some(mut c) = find_city(q) {
+        c.radius_km = r;
+        // Keep the name the user typed if it's an exact/known city
+        if c.name.to_lowercase() != q.to_lowercase() && q.chars().count() >= 3 {
+            // prefix match — use canonical name from list
+        }
+        return Ok(c);
+    }
+
+    let url = format!(
+        "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=ru&accept-language=ru&q={}",
+        percent_encode(q)
+    );
+    let tmp = std::env::temp_dir().join(format!("fireatlas_geocode_{}.json", std::process::id()));
+    download_url_to_file(&url, &tmp).map_err(|e| {
+        format!("Не удалось найти город «{q}» (нужен интернет): {e}")
+    })?;
+    let raw = fs::read_to_string(&tmp).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(&tmp);
+    let items: Vec<NominatimHit> =
+        serde_json::from_str(&raw).map_err(|e| format!("Ответ геокодера: {e}"))?;
+    let hit = items
+        .first()
+        .ok_or_else(|| format!("Город «{q}» не найден. Проверьте написание."))?;
+    let lat: f64 = hit
+        .lat
+        .parse()
+        .map_err(|_| "Некорректные координаты города".to_string())?;
+    let lon: f64 = hit
+        .lon
+        .parse()
+        .map_err(|_| "Некорректные координаты города".to_string())?;
+    let name = hit
+        .display_name
+        .split(',')
+        .next()
+        .unwrap_or(q)
+        .trim()
+        .to_string();
+    Ok(MapCity {
+        id: slugify(&name, lat, lon),
+        name,
+        lat,
+        lon,
+        zoom: if r > 20.0 { 11 } else { 12 },
+        radius_km: r,
     })
 }
 
-pub fn maps_root(data_path: &Path) -> PathBuf {
-    data_path.join("maps")
+pub fn maps_root(maps_parent: &Path) -> PathBuf {
+    maps_parent.join("maps")
 }
 
-pub fn package_dir(data_path: &Path, city_id: &str) -> PathBuf {
-    maps_root(data_path).join(city_id)
+pub fn package_dir(maps_parent: &Path, city_id: &str) -> PathBuf {
+    maps_root(maps_parent).join(city_id)
 }
 
 fn bbox(lat: f64, lon: f64, radius_km: f64) -> (f64, f64, f64, f64) {
@@ -205,38 +322,227 @@ pub fn list_packages(data_path: &Path) -> Result<Vec<MapPackageInfo>, String> {
     Ok(out)
 }
 
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(8))
+        .timeout_read(Duration::from_secs(20))
+        .user_agent("FireAtlas/0.1 (offline map pack)")
+        .build()
+}
+
+fn download_url_to_file(url: &str, dest: &Path) -> Result<(), String> {
+    download_url_with_agent(&http_agent(), url, dest)
+}
+
+fn download_url_with_agent(agent: &ureq::Agent, url: &str, dest: &Path) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    match agent.get(url).call() {
+        Ok(resp) => {
+            let mut bytes = Vec::new();
+            resp.into_reader()
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() < 100 {
+                return Err("пустой ответ".into());
+            }
+            fs::write(dest, &bytes).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        Err(_) => download_curl_hidden(url, dest),
+    }
+}
+
+/// Hidden curl fallback (no console window flash on Windows).
+fn download_curl_hidden(url: &str, dest: &Path) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut cmd = std::process::Command::new("curl.exe");
+    cmd.args([
+        "-fsSL",
+        "--connect-timeout",
+        "8",
+        "--max-time",
+        "25",
+        "-A",
+        "FireAtlas/0.1",
+        "-o",
+        &dest.to_string_lossy(),
+        url,
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| format!("curl.exe не запустился: {e}"))?;
+    if !status.success() {
+        let _ = fs::remove_file(dest);
+        return Err("curl: ошибка загрузки".into());
+    }
+    let len = dest.metadata().map(|m| m.len()).unwrap_or(0);
+    if len < 100 {
+        let _ = fs::remove_file(dest);
+        return Err("пустой файл".into());
+    }
+    Ok(())
+}
+
 pub fn prepare_package(
     app: AppHandle,
-    data_path: PathBuf,
-    city_id: String,
+    maps_parent: PathBuf,
+    city_query: String,
+    radius_km: Option<f64>,
     cancel: Arc<AtomicBool>,
 ) -> Result<MapPackageInfo, String> {
-    let city = find_city(&city_id).ok_or_else(|| format!("Город не найден: {city_id}"))?;
+    let _ = app.emit(
+        "map-pack-progress",
+        MapPackProgress {
+            city_id: String::new(),
+            city_name: city_query.clone(),
+            current: 0,
+            total: 1,
+            message: "Поиск города…".into(),
+            done: false,
+            error: None,
+        },
+    );
+    let city = resolve_city_query(&city_query, radius_km)?;
     let (south, west, north, east) = bbox(city.lat, city.lon, city.radius_km);
-    let zmin = 11;
+    // z12–15: улицы видны; при зуме выше Leaflet увеличивает z15
+    let zmin = 12;
     let zmax = 15;
     let tiles = collect_tiles(south, west, north, east, zmin, zmax);
     let total = tiles.len() as u32;
     if total == 0 {
         return Err("Нет тайлов для выбранной области".into());
     }
-    if total > 12000 {
+    if total > 8000 {
         return Err(format!(
-            "Слишком много тайлов ({total}). Уменьшите радиус города."
+            "Слишком много тайлов ({total}). Уменьшите радиус (сейчас {:.0} км).",
+            city.radius_km
         ));
     }
 
-    let dir = package_dir(&data_path, &city.id);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Store on LOCAL disk (AppData), never on Yandex Disk / cloud data_path — otherwise writes hang.
+    let dir = package_dir(&maps_parent, &city.id);
+    let _ = app.emit(
+        "map-pack-progress",
+        MapPackProgress {
+            city_id: city.id.clone(),
+            city_name: city.name.clone(),
+            current: 0,
+            total,
+            message: format!(
+                "Город найден. Сохранение на локальный диск… ({})",
+                dir.display()
+            ),
+            done: false,
+            error: None,
+        },
+    );
+    fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "Не удалось создать папку пакета {}: {e}",
+            dir.display()
+        )
+    })?;
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(30))
-        .user_agent("FireAtlas/0.1 (offline city pack; OSM raster; local dispatch use)")
-        .build();
+    #[derive(Clone, Copy)]
+    enum TileUrlKind {
+        Xyz,
+        Esri,
+    }
+    let tile_hosts: &[(&str, TileUrlKind)] = &[
+        ("https://basemaps.cartocdn.com/rastertiles/voyager", TileUrlKind::Xyz),
+        ("https://a.basemaps.cartocdn.com/rastertiles/voyager", TileUrlKind::Xyz),
+        (
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile",
+            TileUrlKind::Esri,
+        ),
+        ("https://tile.openstreetmap.org", TileUrlKind::Xyz),
+    ];
+
+    fn tile_url(host: &str, kind: TileUrlKind, z: u32, x: u32, y: u32) -> String {
+        match kind {
+            TileUrlKind::Xyz => format!("{host}/{z}/{x}/{y}.png"),
+            TileUrlKind::Esri => format!("{host}/{z}/{y}/{x}"),
+        }
+    }
+
+    // Probe (in-process HTTP, no console)
+    let agent = http_agent();
+    {
+        let (z, x, y) = tiles[0];
+        let probe = dir.join("_probe.png");
+        let mut probe_ok = false;
+        let mut last_err = String::from("нет ответа");
+        for (host, kind) in tile_hosts {
+            let url = tile_url(host, *kind, z, x, y);
+            let _ = app.emit(
+                "map-pack-progress",
+                MapPackProgress {
+                    city_id: city.id.clone(),
+                    city_name: city.name.clone(),
+                    current: 0,
+                    total,
+                    message: "Проверка доступа к тайлам…".into(),
+                    done: false,
+                    error: None,
+                },
+            );
+            match download_url_with_agent(&agent, &url, &probe) {
+                Ok(()) => {
+                    probe_ok = true;
+                    let _ = fs::remove_file(&probe);
+                    break;
+                }
+                Err(e) => last_err = e,
+            }
+        }
+        if !probe_ok {
+            let msg = format!(
+                "Не удалось скачать тайл ({last_err}). Проверьте интернет."
+            );
+            let _ = app.emit(
+                "map-pack-progress",
+                MapPackProgress {
+                    city_id: city.id.clone(),
+                    city_name: city.name.clone(),
+                    current: 0,
+                    total,
+                    message: msg.clone(),
+                    done: true,
+                    error: Some(msg.clone()),
+                },
+            );
+            return Err(msg);
+        }
+    }
+
+    let eta_min = ((total as f64) * 0.05 / 60.0).ceil().max(1.0) as u32;
+    let _ = app.emit(
+        "map-pack-progress",
+        MapPackProgress {
+            city_id: city.id.clone(),
+            city_name: city.name.clone(),
+            current: 0,
+            total,
+            message: format!("Фоновая загрузка {total} тайлов (~{eta_min} мин)…"),
+            done: false,
+            error: None,
+        },
+    );
 
     let mut ok = 0u32;
     let mut fail = 0u32;
+    let mut consecutive_fail = 0u32;
+    let mut working: Option<(String, TileUrlKind)> = None;
 
     for (i, (z, x, y)) in tiles.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
@@ -255,38 +561,7 @@ pub fn prepare_package(
             return Err("Подготовка отменена".into());
         }
 
-        let tile_path = dir.join(format!("{z}/{x}/{y}.png"));
-        if tile_path.exists() && tile_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            ok += 1;
-        } else {
-            if let Some(parent) = tile_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            let url = format!("https://tile.openstreetmap.org/{z}/{x}/{y}.png");
-            match agent.get(&url).call() {
-                Ok(resp) => {
-                    let mut bytes = Vec::new();
-                    resp.into_reader()
-                        .read_to_end(&mut bytes)
-                        .map_err(|e| e.to_string())?;
-                    if bytes.len() > 100 {
-                        let mut f = fs::File::create(&tile_path).map_err(|e| e.to_string())?;
-                        f.write_all(&bytes).map_err(|e| e.to_string())?;
-                        ok += 1;
-                    } else {
-                        fail += 1;
-                    }
-                }
-                Err(_) => {
-                    fail += 1;
-                    thread::sleep(Duration::from_millis(400));
-                }
-            }
-            // Be polite to OSM tile servers
-            thread::sleep(Duration::from_millis(120));
-        }
-
-        if i % 10 == 0 || i + 1 == tiles.len() {
+        if i % 5 == 0 || i + 1 == tiles.len() {
             let _ = app.emit(
                 "map-pack-progress",
                 MapPackProgress {
@@ -294,11 +569,62 @@ pub fn prepare_package(
                     city_name: city.name.clone(),
                     current: (i + 1) as u32,
                     total,
-                    message: format!("Скачано {ok}, ошибок {fail}"),
+                    message: format!("Скачано {ok} из {total}, ошибок {fail}"),
                     done: false,
                     error: None,
                 },
             );
+        }
+
+        let tile_path = dir.join(format!("{z}/{x}/{y}.png"));
+        if tile_path.exists() && tile_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            ok += 1;
+            consecutive_fail = 0;
+            continue;
+        }
+
+        let mut saved = false;
+        let mut hosts_order: Vec<(String, TileUrlKind)> = Vec::new();
+        if let Some(w) = working.clone() {
+            hosts_order.push(w);
+        }
+        for (host, kind) in tile_hosts {
+            if working.as_ref().map(|(h, _)| h.as_str()) != Some(*host) {
+                hosts_order.push(((*host).to_string(), *kind));
+            }
+        }
+
+        for (host, kind) in hosts_order {
+            let url = tile_url(&host, kind, *z, *x, *y);
+            if download_url_with_agent(&agent, &url, &tile_path).is_ok() {
+                ok += 1;
+                consecutive_fail = 0;
+                working = Some((host, kind));
+                saved = true;
+                break;
+            }
+        }
+
+        if !saved {
+            fail += 1;
+            consecutive_fail += 1;
+        }
+
+        if consecutive_fail >= 15 && ok == 0 {
+            let msg = "Серверы тайлов недоступны. Проверьте интернет.".to_string();
+            let _ = app.emit(
+                "map-pack-progress",
+                MapPackProgress {
+                    city_id: city.id.clone(),
+                    city_name: city.name.clone(),
+                    current: i as u32,
+                    total,
+                    message: msg.clone(),
+                    done: true,
+                    error: Some(msg.clone()),
+                },
+            );
+            return Err(msg);
         }
     }
 
@@ -316,7 +642,7 @@ pub fn prepare_package(
         east,
         tile_count: ok,
         created_at: Local::now().to_rfc3339(),
-        source: "OpenStreetMap raster tiles".into(),
+        source: "Carto Voyager / Esri / OpenStreetMap raster tiles".into(),
     };
     fs::write(
         dir.join("meta.json"),

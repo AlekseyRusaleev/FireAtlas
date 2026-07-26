@@ -4,6 +4,7 @@ import L from "leaflet";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import "leaflet/dist/leaflet.css";
 import type { WaterPoint, WaterType } from "../../shared/types";
+import type { SearchPin } from "./YandexMapView";
 
 function typeColor(t: WaterType): string {
   switch (t) {
@@ -31,45 +32,72 @@ function makeIcon(type: WaterType, focus: boolean) {
   });
 }
 
+const SEARCH_PIN_ICON = L.divIcon({
+  className: "",
+  html: `<div style="width:22px;height:22px;border-radius:50%;background:#ffcc00;border:3px solid #fff;box-shadow:0 0 0 6px rgba(255,204,0,.35),0 2px 8px rgba(0,0,0,.45)"></div>`,
+  iconSize: [22, 22],
+  iconAnchor: [11, 11],
+});
+
 function LocalTiles({
   packagePath,
-  minZoom,
-  maxZoom,
+  nativeMinZoom,
+  nativeMaxZoom,
 }: {
   packagePath: string;
-  minZoom: number;
-  maxZoom: number;
+  nativeMinZoom: number;
+  nativeMaxZoom: number;
 }) {
   const map = useMap();
   useEffect(() => {
     const root = packagePath.replace(/[/\\]+$/, "");
+    const sep = root.includes("\\") ? "\\" : "/";
     const Layer = L.TileLayer.extend({
       getTileUrl(coords: L.Coords) {
-        const tilePath = `${root}${root.includes("\\") ? "\\" : "/"}${coords.z}${
-          root.includes("\\") ? "\\" : "/"
-        }${coords.x}${root.includes("\\") ? "\\" : "/"}${coords.y}.png`;
+        const tilePath = `${root}${sep}${coords.z}${sep}${coords.x}${sep}${coords.y}.png`;
         return convertFileSrc(tilePath);
       },
     });
-    const layer = new (Layer as unknown as typeof L.TileLayer)("", {
-      minZoom,
-      maxZoom,
-      maxNativeZoom: maxZoom,
-      attribution: "&copy; OpenStreetMap",
+    const local = new (Layer as unknown as typeof L.TileLayer)("", {
+      minZoom: 1,
+      maxZoom: 22,
+      minNativeZoom: nativeMinZoom,
+      maxNativeZoom: nativeMaxZoom,
+      attribution: "&copy; OpenStreetMap / Carto",
+      errorTileUrl:
+        "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
     });
-    layer.addTo(map);
+    local.addTo(map);
+
+    // При сильном приближении подтягиваем онлайн-тайлы с крупными подписями (если есть сеть).
+    const online = L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_labels_under/{z}/{x}/{y}.png",
+      {
+        subdomains: "abcd",
+        minZoom: nativeMaxZoom + 1,
+        maxZoom: 20,
+        maxNativeZoom: 20,
+        attribution: "&copy; OpenStreetMap, &copy; Carto",
+        opacity: 1,
+      }
+    );
+    online.addTo(map);
+
     return () => {
-      map.removeLayer(layer);
+      map.removeLayer(local);
+      map.removeLayer(online);
     };
-  }, [map, packagePath, minZoom, maxZoom]);
+  }, [map, packagePath, nativeMinZoom, nativeMaxZoom]);
   return null;
 }
 
 function FlyTo({ center, zoom }: { center: [number, number]; zoom: number }) {
   const map = useMap();
   useEffect(() => {
-    map.setView(center, zoom);
-  }, [center, zoom, map]);
+    // invalidateSize помогает, если панель только что обновилась
+    map.invalidateSize();
+    map.setView(center, zoom, { animate: true });
+  }, [center[0], center[1], zoom, map]);
   return null;
 }
 
@@ -137,26 +165,53 @@ function MarkersLayer({
   return null;
 }
 
+function SearchPinLayer({ searchPin }: { searchPin: SearchPin | null }) {
+  const map = useMap();
+  useEffect(() => {
+    if (!searchPin) return;
+    const group = L.layerGroup().addTo(map);
+    L.circle([searchPin.lat, searchPin.lon], {
+      radius: 45,
+      color: "#ffcc00",
+      weight: 2,
+      fillColor: "#ffcc00",
+      fillOpacity: 0.2,
+    }).addTo(group);
+    const marker = L.marker([searchPin.lat, searchPin.lon], {
+      icon: SEARCH_PIN_ICON,
+      zIndexOffset: 1000,
+    });
+    marker.bindPopup(`<strong>${searchPin.label}</strong>`).addTo(group);
+    marker.openPopup();
+    return () => {
+      map.removeLayer(group);
+    };
+  }, [map, searchPin]);
+  return null;
+}
+
 interface Props {
   packagePath: string;
-  minZoom: number;
-  maxZoom: number;
+  nativeMinZoom?: number;
+  nativeMaxZoom?: number;
   center: [number, number];
   zoom: number;
   points: WaterPoint[];
   focusId: number | null;
+  searchPin?: SearchPin | null;
   onBoundsChange: (b: { south: number; west: number; north: number; east: number }) => void;
   onPointClick: (p: WaterPoint) => void;
 }
 
 export function LocalMapView({
   packagePath,
-  minZoom,
-  maxZoom,
+  nativeMinZoom = 12,
+  nativeMaxZoom = 14,
   center,
   zoom,
   points,
   focusId,
+  searchPin = null,
   onBoundsChange,
   onPointClick,
 }: Props) {
@@ -171,19 +226,28 @@ export function LocalMapView({
     );
   }
 
+  const viewMin = Math.max(1, nativeMinZoom - 2);
+  const viewMax = 19;
+  const initialZoom = Math.min(Math.max(zoom, viewMin), viewMax);
+
   return (
     <MapContainer
       center={center}
-      zoom={zoom}
-      minZoom={minZoom}
-      maxZoom={maxZoom}
+      zoom={initialZoom}
+      minZoom={viewMin}
+      maxZoom={viewMax}
       zoomControl
       style={{ width: "100%", height: "100%" }}
     >
-      <LocalTiles packagePath={packagePath} minZoom={minZoom} maxZoom={maxZoom} />
-      <FlyTo center={center} zoom={Math.max(zoom, minZoom)} />
+      <LocalTiles
+        packagePath={packagePath}
+        nativeMinZoom={nativeMinZoom}
+        nativeMaxZoom={nativeMaxZoom}
+      />
+      <FlyTo center={center} zoom={Math.min(Math.max(zoom, viewMin), viewMax)} />
       <BoundsWatcher onBounds={onBoundsChange} />
       <MarkersLayer points={points} focusId={focusId} onPointClick={onPointClick} />
+      <SearchPinLayer searchPin={searchPin} />
     </MapContainer>
   );
 }

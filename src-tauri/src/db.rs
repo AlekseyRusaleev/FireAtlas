@@ -324,6 +324,186 @@ impl Db {
             .join(" ")
     }
 
+    /// Запрос похож на адрес / улицу / дом — приоритет карточек.
+    fn looks_like_address_query(q: &str) -> bool {
+        let lower = q.to_lowercase();
+        lower.chars().any(|c| c.is_ascii_digit())
+            || [
+                "ул",
+                "улица",
+                "проспект",
+                "пр-т",
+                "пр.",
+                "переулок",
+                "пер",
+                "шоссе",
+                "проезд",
+                "бульвар",
+                "наб",
+                "набережная",
+                "дом",
+                "д.",
+                "пл",
+                "площадь",
+                "микрорайон",
+                "мкр",
+            ]
+            .iter()
+            .any(|k| lower.contains(k))
+    }
+
+    /// Запрос похож на номер объекта / ИК.
+    fn looks_like_object_number(q: &str) -> bool {
+        let t = q.trim();
+        if t.contains('№') {
+            return true;
+        }
+        let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() || digits.len() > 5 {
+            return false;
+        }
+        let alpha: String = t
+            .chars()
+            .filter(|c| c.is_alphabetic())
+            .collect::<String>()
+            .to_lowercase();
+        alpha.is_empty()
+            || alpha == "ик"
+            || alpha == "ik"
+            || alpha.starts_with("ик")
+            || alpha == "n"
+            || alpha == "no"
+    }
+
+    fn extract_query_number(q: &str) -> Option<String> {
+        if let Some(pos) = q.find('№') {
+            let tail: String = q[pos + '№'.len_utf8()..]
+                .chars()
+                .skip_while(|c| c.is_whitespace())
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !tail.is_empty() {
+                return Some(tail);
+            }
+        }
+        let digits: String = q.chars().filter(|c| c.is_ascii_digit()).collect();
+        if (1..=5).contains(&digits.len()) {
+            Some(digits)
+        } else {
+            None
+        }
+    }
+
+    fn card_hit_from_row(
+        id: i64,
+        title: String,
+        address: Option<String>,
+        district: Option<String>,
+        number: Option<String>,
+        lat: Option<f64>,
+        lon: Option<f64>,
+    ) -> SearchHit {
+        let num_label = number
+            .as_ref()
+            .map(|n| format!("№{n}"))
+            .unwrap_or_default();
+        let subtitle = [Some(num_label).filter(|s| !s.is_empty()), address.clone(), district]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        SearchHit {
+            id,
+            kind: "card".into(),
+            title,
+            subtitle: if subtitle.is_empty() {
+                "Информационная карточка".into()
+            } else {
+                subtitle
+            },
+            water_type: None,
+            address,
+            lat,
+            lon,
+            distance_m: None,
+        }
+    }
+
+    fn score_card_hit(hit: &SearchHit, q: &str, query_number: Option<&str>) -> i32 {
+        let mut score = 100; // base: card
+        let q_lower = q.to_lowercase();
+        let title_l = hit.title.to_lowercase();
+        let addr_l = hit.address.as_deref().unwrap_or("").to_lowercase();
+        let sub_l = hit.subtitle.to_lowercase();
+        // Ищем и в адресе, и в названии папки (часто адрес только в title)
+        let hay = format!("{title_l} {addr_l} {sub_l}");
+        let address_query = Self::looks_like_address_query(q);
+
+        let street_tokens: Vec<&str> = q_lower
+            .split_whitespace()
+            .filter(|t| {
+                let chars = t.chars().count();
+                chars >= 3 && !t.chars().all(|c| c.is_ascii_digit())
+            })
+            .collect();
+        let street_hits = street_tokens
+            .iter()
+            .filter(|t| hay.contains(*t))
+            .count() as i32;
+        let house_in_text = query_number
+            .map(|n| {
+                // номер дома рядом с улицей, а не только «ИК №N»
+                addr_l.contains(n)
+                    || title_l.contains(n)
+                    || hay.contains(&format!(", {n}"))
+                    || hay.contains(&format!(" {n}"))
+                    || hay.ends_with(n)
+            })
+            .unwrap_or(false);
+
+        let ik_number_match = query_number
+            .map(|num| {
+                sub_l.contains(&format!("№{num}"))
+                    || hit
+                        .subtitle
+                        .split(['·', ' ', ',', '№'])
+                        .any(|t| t.trim() == num)
+            })
+            .unwrap_or(false);
+
+        if address_query && !street_tokens.is_empty() {
+            // «Ленина 56» → улица + дом важнее, чем чужой ИК №56
+            if street_hits > 0 && house_in_text {
+                score += 1000 + street_hits * 50;
+            } else if street_hits > 0 {
+                score += 250 * street_hits;
+            }
+            // Совпадение только номера ИК при адресном запросе — почти не учитываем
+            if ik_number_match && street_hits == 0 {
+                score += 40;
+            }
+        } else if let Some(num) = query_number {
+            // Запрос вроде «56» / «ИК 56» — приоритет номера объекта
+            if ik_number_match {
+                score += 500;
+            }
+            if title_l.contains(num) {
+                score += 200;
+            }
+        }
+
+        if !addr_l.is_empty() {
+            if addr_l == q_lower || addr_l.contains(&q_lower) || q_lower.contains(&addr_l) {
+                score += 300;
+            }
+        }
+        if title_l.contains(&q_lower) {
+            score += 150;
+        }
+        score
+    }
+
     pub fn search(
         &self,
         query: &str,
@@ -339,7 +519,9 @@ impl Db {
             return Ok(vec![]);
         }
 
-        let mut hits = Vec::new();
+        let prefer_cards = Self::looks_like_address_query(q) || Self::looks_like_object_number(q);
+        let query_number = Self::extract_query_number(q);
+        let limit_usize = limit.max(1) as usize;
 
         let type_filter = if types.is_empty() {
             None
@@ -347,6 +529,125 @@ impl Db {
             Some(types.to_vec())
         };
 
+        let mut card_hits: Vec<SearchHit> = Vec::new();
+        let mut seen_cards = std::collections::HashSet::<i64>::new();
+
+        // 1) Точное/префиксное совпадение номера объекта — критично для диспетчера
+        if let Some(ref num) = query_number {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT id, title, address, district, number, lat, lon
+                     FROM cards
+                     WHERE number = ?1 OR number LIKE ?2
+                     LIMIT 40",
+                )
+                .map_err(|e| e.to_string())?;
+            let like = format!("{num}%");
+            let rows = stmt
+                .query_map(params![num, like], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<f64>>(5)?,
+                        r.get::<_, Option<f64>>(6)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (id, title, address, district, number, lat, lon) =
+                    row.map_err(|e| e.to_string())?;
+                if seen_cards.insert(id) {
+                    card_hits.push(Self::card_hit_from_row(
+                        id, title, address, district, number, lat, lon,
+                    ));
+                }
+            }
+        }
+
+        // 2) LIKE по адресу карточки (если запрос похож на адрес)
+        if Self::looks_like_address_query(q) {
+            let pattern = format!("%{}%", q.trim());
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT id, title, address, district, number, lat, lon
+                     FROM cards
+                     WHERE address LIKE ?1 OR title LIKE ?1
+                     LIMIT 40",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![pattern], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<f64>>(5)?,
+                        r.get::<_, Option<f64>>(6)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (id, title, address, district, number, lat, lon) =
+                    row.map_err(|e| e.to_string())?;
+                if seen_cards.insert(id) {
+                    card_hits.push(Self::card_hit_from_row(
+                        id, title, address, district, number, lat, lon,
+                    ));
+                }
+            }
+        }
+
+        // 3) FTS по карточкам
+        {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT c.id, c.title, c.address, c.district, c.number, c.lat, c.lon
+                     FROM cards_fts
+                     JOIN cards c ON c.id = cards_fts.rowid
+                     WHERE cards_fts MATCH ?1
+                     LIMIT ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![fts, limit], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<f64>>(5)?,
+                        r.get::<_, Option<f64>>(6)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+
+            for row in rows {
+                let (id, title, address, district, number, lat, lon) =
+                    row.map_err(|e| e.to_string())?;
+                if seen_cards.insert(id) {
+                    card_hits.push(Self::card_hit_from_row(
+                        id, title, address, district, number, lat, lon,
+                    ));
+                }
+            }
+        }
+
+        card_hits.sort_by(|a, b| {
+            Self::score_card_hit(b, q, query_number.as_deref())
+                .cmp(&Self::score_card_hit(a, q, query_number.as_deref()))
+                .then_with(|| a.title.cmp(&b.title))
+        });
+
+        let mut water_hits: Vec<SearchHit> = Vec::new();
         {
             let mut stmt = self
                 .conn
@@ -379,7 +680,7 @@ impl Db {
                         continue;
                     }
                 }
-                hits.push(SearchHit {
+                water_hits.push(SearchHit {
                     id,
                     kind: "water".into(),
                     title: name,
@@ -395,58 +696,31 @@ impl Db {
             }
         }
 
-        {
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT c.id, c.title, c.address, c.district, c.number, c.lat, c.lon
-                     FROM cards_fts
-                     JOIN cards c ON c.id = cards_fts.rowid
-                     WHERE cards_fts MATCH ?1
-                     LIMIT ?2",
-                )
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map(params![fts, limit], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, Option<f64>>(5)?,
-                        r.get::<_, Option<f64>>(6)?,
-                    ))
-                })
-                .map_err(|e| e.to_string())?;
-
-            for row in rows {
-                let (id, title, address, district, number, lat, lon) =
-                    row.map_err(|e| e.to_string())?;
-                let subtitle = [number, address.clone(), district]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                hits.push(SearchHit {
-                    id,
-                    kind: "card".into(),
-                    title,
-                    subtitle: if subtitle.is_empty() {
-                        "Информационная карточка".into()
-                    } else {
-                        subtitle
-                    },
-                    water_type: None,
-                    address,
-                    lat,
-                    lon,
-                    distance_m: None,
-                });
-            }
+        let mut hits = Vec::with_capacity(limit_usize);
+        if prefer_cards || query_number.is_some() {
+            // Карточки (с номером объекта) — первыми для диспетчера
+            hits.extend(card_hits.into_iter().take(limit_usize));
+            let rest = limit_usize.saturating_sub(hits.len());
+            hits.extend(water_hits.into_iter().take(rest));
+        } else {
+            // Обычный поиск: сильные совпадения карточек (номер) всё равно выше
+            let strong: Vec<_> = card_hits
+                .iter()
+                .filter(|h| Self::score_card_hit(h, q, query_number.as_deref()) >= 400)
+                .cloned()
+                .collect();
+            let weak: Vec<_> = card_hits
+                .into_iter()
+                .filter(|h| Self::score_card_hit(h, q, query_number.as_deref()) < 400)
+                .collect();
+            hits.extend(strong.into_iter().take(limit_usize));
+            let rest = limit_usize.saturating_sub(hits.len());
+            hits.extend(water_hits.into_iter().take(rest));
+            let rest = limit_usize.saturating_sub(hits.len());
+            hits.extend(weak.into_iter().take(rest));
         }
 
-        hits.truncate(limit as usize);
+        hits.truncate(limit_usize);
         Ok(hits)
     }
 

@@ -34,6 +34,10 @@ export async function importKmzFiles(): Promise<ReindexReport> {
   return invoke("import_kmz_files");
 }
 
+export async function importKmzFolder(): Promise<ReindexReport> {
+  return invoke("import_kmz_folder");
+}
+
 export async function search(
   query: string,
   types: WaterType[],
@@ -140,12 +144,25 @@ export async function listMapCities(): Promise<MapCity[]> {
   return invoke("list_map_cities");
 }
 
+export async function resolveCity(
+  query: string,
+  radiusKm?: number
+): Promise<MapCity> {
+  return invoke("resolve_city", { query, radiusKm: radiusKm ?? null });
+}
+
 export async function listMapPackages(): Promise<MapPackageInfo[]> {
   return invoke("list_map_packages");
 }
 
-export async function prepareMapPackage(cityId: string): Promise<MapPackageInfo> {
-  return invoke("prepare_map_package", { cityId });
+export async function prepareMapPackage(
+  cityName: string,
+  radiusKm?: number
+): Promise<void> {
+  return invoke("prepare_map_package", {
+    cityName,
+    radiusKm: radiusKm ?? null,
+  });
 }
 
 export async function cancelMapPackage(): Promise<void> {

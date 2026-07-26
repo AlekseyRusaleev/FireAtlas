@@ -10,11 +10,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   map_provider: "local",
   yandex_api_key: "",
   dgis_api_key: "",
-  default_city: "Кемерово",
-  default_lat: 55.3549,
-  default_lon: 86.0885,
+  default_city: "",
+  default_lat: 0,
+  default_lon: 0,
   default_zoom: 12,
-  local_map_city_id: "kemerovo",
+  local_map_city_id: "",
   local_map_path: "",
 };
 

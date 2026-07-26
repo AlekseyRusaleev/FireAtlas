@@ -30,13 +30,13 @@ fn default_provider() -> String {
     "local".into()
 }
 fn default_city() -> String {
-    "Кемерово".into()
+    String::new()
 }
 fn default_lat() -> f64 {
-    55.3549
+    0.0
 }
 fn default_lon() -> f64 {
-    86.0885
+    0.0
 }
 fn default_zoom() -> u32 {
     12
@@ -53,7 +53,7 @@ impl Default for AppSettings {
             default_lat: default_lat(),
             default_lon: default_lon(),
             default_zoom: default_zoom(),
-            local_map_city_id: "kemerovo".into(),
+            local_map_city_id: String::new(),
             local_map_path: String::new(),
         }
     }

@@ -5,10 +5,8 @@ import {
   CITIES,
   type AppSettings,
   type IndexStats,
-  type MapCity,
   type MapPackageInfo,
   type MapPackProgress,
-  type MapProviderId,
   type SourceInfo,
 } from "../../shared/types";
 
@@ -24,29 +22,28 @@ function normalize(form: AppSettings): AppSettings {
   return {
     ...form,
     data_path: form.data_path.trim(),
-    yandex_api_key: form.yandex_api_key.trim(),
-    dgis_api_key: form.dgis_api_key.trim(),
-    default_city: form.default_city.trim() || "Кемерово",
+    map_provider: "local",
+    yandex_api_key: "",
+    dgis_api_key: "",
+    default_city: form.default_city.trim(),
     local_map_city_id: form.local_map_city_id?.trim() || "",
     local_map_path: form.local_map_path?.trim() || "",
   };
 }
 
 export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap }: Props) {
-  const [form, setForm] = useState<AppSettings>({
-    ...settings,
-    default_city: settings.default_city || "Кемерово",
-  });
+  const [form, setForm] = useState<AppSettings>({ ...settings });
   const [cityQuery, setCityQuery] = useState(settings.default_city || "");
   const [showHints, setShowHints] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [messageOk, setMessageOk] = useState(false);
   const [sources, setSources] = useState<SourceInfo[]>([]);
-  const [mapCities, setMapCities] = useState<MapCity[]>([]);
   const [packages, setPackages] = useState<MapPackageInfo[]>([]);
-  const [packCityId, setPackCityId] = useState(settings.local_map_city_id || "kemerovo");
+  const [packCityName, setPackCityName] = useState(settings.default_city || "");
+  const [packRadiusKm, setPackRadiusKm] = useState(12);
   const [packProgress, setPackProgress] = useState<MapPackProgress | null>(null);
+  const [packDownloading, setPackDownloading] = useState(false);
 
   async function refreshSources() {
     try {
@@ -65,26 +62,14 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
   }
 
   useEffect(() => {
-    void (async () => {
-      try {
-        const list = await api.listMapCities();
-        setMapCities(list);
-        setPackCityId((prev) => prev || list[0]?.id || "kemerovo");
-      } catch {
-        /* ignore */
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
     setForm({
       ...settings,
-      default_city: settings.default_city || "Кемерово",
-      local_map_city_id: settings.local_map_city_id || "kemerovo",
+      default_city: settings.default_city || "",
+      local_map_city_id: settings.local_map_city_id || "",
       local_map_path: settings.local_map_path || "",
     });
     setCityQuery(settings.default_city || "");
-    setPackCityId(settings.local_map_city_id || "kemerovo");
+    // Не сбрасываем packCityName во время скачивания
   }, [settings]);
 
   useEffect(() => {
@@ -93,16 +78,63 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
   }, []);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenFinished: (() => void) | undefined;
     void (async () => {
-      unlisten = await listen<MapPackProgress>("map-pack-progress", (ev) => {
+      unlistenProgress = await listen<MapPackProgress>("map-pack-progress", (ev) => {
         setPackProgress(ev.payload);
+        if (ev.payload.done) {
+          setPackDownloading(false);
+          if (ev.payload.error) {
+            setMessage(ev.payload.error);
+            setMessageOk(false);
+          }
+        } else {
+          setPackDownloading(true);
+        }
+      });
+      unlistenFinished = await listen<MapPackageInfo>("map-pack-finished", (ev) => {
+        const info = ev.payload;
+        setPackDownloading(false);
+        setPackProgress((p) =>
+          p
+            ? { ...p, done: true, current: p.total, message: `Готово: ${info.tile_count} тайлов` }
+            : null
+        );
+        void (async () => {
+          try {
+            const saved = await api.getSettings();
+            await onSaved(saved);
+            await refreshPackages();
+            setForm((f) => ({
+              ...f,
+              ...saved,
+              map_provider: "local",
+              local_map_city_id: info.id,
+              local_map_path: info.path,
+              default_city: info.name,
+              default_lat: info.lat,
+              default_lon: info.lon,
+              default_zoom: info.zoom,
+            }));
+            setCityQuery(info.name);
+            setPackCityName(info.name);
+            setMessage(
+              `Пакет «${info.name}» готов: ${info.tile_count} тайлов.\n${info.path}`
+            );
+            setMessageOk(true);
+          } catch (e) {
+            setMessage(e instanceof Error ? e.message : String(e));
+            setMessageOk(false);
+          }
+        })();
       });
     })();
     return () => {
-      unlisten?.();
+      unlistenProgress?.();
+      unlistenFinished?.();
     };
-  }, []);
+  }, [onSaved]);
 
   const dirty = useMemo(() => {
     const a = normalize(form);
@@ -134,18 +166,8 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
     setMessage(null);
     setMessageOk(false);
     try {
-      const saved = await ensureSaved();
-      const parts = ["Настройки сохранены."];
-      if (saved.map_provider === "yandex") {
-        if (saved.yandex_api_key) {
-          parts.push(
-            `Ключ Яндекса сохранён (${saved.yandex_api_key.slice(0, 8)}…). Откройте вкладку «Карта».`
-          );
-        } else {
-          parts.push("Ключ Яндекса пустой — карта не загрузится. Вставьте ключ и снова нажмите «Сохранить».");
-        }
-      }
-      setMessage(parts.join(" "));
+      await ensureSaved();
+      setMessage("Настройки сохранены.");
       setMessageOk(true);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
@@ -182,7 +204,9 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
 
   async function importKmz() {
     setBusy(true);
-    setMessage("Выберите файлы KML/KMZ… После выбора идёт индексация — подождите.");
+    setMessage(
+      "Выберите файлы .kml / .kmz (можно несколько). После выбора идёт индексация — подождите."
+    );
     setMessageOk(false);
     try {
       await ensureSaved();
@@ -190,9 +214,32 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
       await onReindexed();
       await refreshSources();
       setMessage(
-        `${report.hint}\nФайлы добавляются параллельно к уже загруженным (не затирают другие).\nИмпортировано файлов: ${report.files_ok}, ИППВ в индексе: ${report.water_points}`
+        `${report.hint}\nФайлы копируются в папку KMZ внутри базы и добавляются к уже загруженным.\nИмпортировано файлов: ${report.files_ok}, ИППВ в индексе: ${report.water_points}`
       );
-      setMessageOk(true);
+      setMessageOk(report.files_ok > 0 || report.hint.includes("отменён"));
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+      setMessageOk(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importKmzFromFolder() {
+    setBusy(true);
+    setMessage(
+      "Выберите папку с файлами .kml/.kmz (например «Загрузки»). Это НЕ пакет карты OSM."
+    );
+    setMessageOk(false);
+    try {
+      await ensureSaved();
+      const report = await api.importKmzFolder();
+      await onReindexed();
+      await refreshSources();
+      setMessage(
+        `${report.hint}\nИмпортировано файлов: ${report.files_ok}, ИППВ в индексе: ${report.water_points}`
+      );
+      setMessageOk(report.files_ok > 0 || report.hint.includes("отменён"));
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
       setMessageOk(false);
@@ -220,134 +267,93 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
     }
   }
 
-  function applyCity(name: string) {
-    const city =
+  async function applyCity(name: string) {
+    const local =
       CITIES.find((c) => c.name.toLowerCase() === name.toLowerCase()) ??
       CITIES.find((c) => c.name.toLowerCase().includes(name.trim().toLowerCase()));
-    if (!city) {
-      setForm((f) => ({ ...f, default_city: name }));
-      setCityQuery(name);
+    if (local) {
+      setForm((f) => ({
+        ...f,
+        default_city: local.name,
+        default_lat: local.lat,
+        default_lon: local.lon,
+        default_zoom: local.zoom,
+      }));
+      setCityQuery(local.name);
+      setPackCityName(local.name);
       setShowHints(false);
-      setMessage(
-        `Город «${name}» сохранён как название. Выберите город из подсказок, чтобы задать координаты карты.`
-      );
-      setMessageOk(false);
       return;
     }
-    setForm((f) => ({
-      ...f,
-      default_city: city.name,
-      default_lat: city.lat,
-      default_lon: city.lon,
-      default_zoom: city.zoom,
-    }));
-    setCityQuery(city.name);
-    setShowHints(false);
+    setBusy(true);
+    setMessage(`Ищем город «${name}»…`);
+    setMessageOk(false);
+    try {
+      const city = await api.resolveCity(name);
+      setForm((f) => ({
+        ...f,
+        default_city: city.name,
+        default_lat: city.lat,
+        default_lon: city.lon,
+        default_zoom: city.zoom,
+      }));
+      setCityQuery(city.name);
+      setPackCityName(city.name);
+      setShowHints(false);
+      setMessage(
+        `Город «${city.name}»: ${city.lat.toFixed(4)}, ${city.lon.toFixed(4)}`
+      );
+      setMessageOk(true);
+    } catch (e) {
+      setForm((f) => ({ ...f, default_city: name }));
+      setCityQuery(name);
+      setPackCityName(name);
+      setShowHints(false);
+      setMessage(e instanceof Error ? e.message : String(e));
+      setMessageOk(false);
+    } finally {
+      setBusy(false);
+    }
   }
 
   function searchCity() {
     const q = cityQuery.trim();
     if (!q) return;
-    applyCity(q);
+    void applyCity(q);
   }
 
   async function preparePack() {
-    setBusy(true);
-    setMessage("Подготовка пакета карты… Нужен интернет. Не закрывайте окно.");
-    setMessageOk(false);
-    setPackProgress(null);
-    try {
-      await ensureSaved();
-      const info = await api.prepareMapPackage(packCityId);
-      await onSaved(await api.getSettings());
-      await refreshPackages();
-      setForm((f) => ({
-        ...f,
-        map_provider: "local",
-        local_map_city_id: info.id,
-        local_map_path: info.path,
-        default_city: info.name,
-        default_lat: info.lat,
-        default_lon: info.lon,
-        default_zoom: info.zoom,
-      }));
-      setMessage(
-        `Пакет «${info.name}» готов: ${info.tile_count} тайлов.\nПуть: ${info.path}\nПровайдер переключён на локальную карту.`
-      );
-      setMessageOk(true);
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
+    const name = packCityName.trim();
+    if (!name) {
+      setMessage("Введите название города для пакета карты");
       setMessageOk(false);
-    } finally {
-      setBusy(false);
+      return;
     }
-  }
-
-  async function importPack() {
-    setBusy(true);
-    setMessageOk(false);
-    try {
-      await ensureSaved();
-      const info = await api.importMapPackageZip();
-      await onSaved(await api.getSettings());
-      await refreshPackages();
-      setForm((f) => ({
-        ...f,
-        map_provider: "local",
-        local_map_city_id: info.id,
-        local_map_path: info.path,
-        default_city: info.name,
-        default_lat: info.lat,
-        default_lon: info.lon,
-        default_zoom: info.zoom,
-      }));
-      setMessage(`Загружен пакет «${info.name}» (${info.tile_count} тайлов).`);
-      setMessageOk(true);
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
+    if (packDownloading) {
+      setMessage("Уже идёт скачивание. Нажмите «Отменить» или дождитесь окончания.");
       setMessageOk(false);
-    } finally {
-      setBusy(false);
+      return;
     }
-  }
-
-  async function pickPackFolder() {
-    setBusy(true);
+    setPackDownloading(true);
+    setMessage(
+      `Скачивание «${name}» запущено в фоне. Можно пользоваться программой — консоль не откроется.`
+    );
+    setMessageOk(true);
+    setPackProgress({
+      city_id: "",
+      city_name: name,
+      current: 0,
+      total: 1,
+      message: "Старт в фоне…",
+      done: false,
+      error: null,
+    });
     try {
-      const info = await api.pickMapPackageFolder();
-      await onSaved(await api.getSettings());
-      await refreshPackages();
-      setForm((f) => ({
-        ...f,
-        map_provider: "local",
-        local_map_city_id: info.id,
-        local_map_path: info.path,
-        default_city: info.name,
-        default_lat: info.lat,
-        default_lon: info.lon,
-        default_zoom: info.zoom,
-      }));
-      setMessage(`Выбран пакет «${info.name}».`);
-      setMessageOk(true);
+      await api.prepareMapPackage(name, packRadiusKm);
     } catch (e) {
+      setPackDownloading(false);
       setMessage(e instanceof Error ? e.message : String(e));
       setMessageOk(false);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function exportPack() {
-    setBusy(true);
-    try {
-      const path = await api.exportMapPackageZip(form.local_map_path || undefined);
-      setMessage(`Пакет сохранён: ${path}\nЕго можно передать в другой город.`);
-      setMessageOk(true);
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
-      setMessageOk(false);
-    } finally {
-      setBusy(false);
+      setPackCityName(name);
     }
   }
 
@@ -373,7 +379,7 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
             <button className="btn primary" type="submit" disabled={busy}>
               {busy ? "Сохранение…" : "Сохранить"}
             </button>
-            {messageOk && form.map_provider === "yandex" && form.yandex_api_key.trim() && onOpenMap && (
+            {onOpenMap && (
               <button type="button" className="btn" onClick={onOpenMap}>
                 Открыть карту
               </button>
@@ -405,7 +411,7 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
         </div>
 
         <div className="field">
-          <label>ИППВ (KML/KMZ)</label>
+          <label>Водоисточники ИППВ (.kml / .kmz)</label>
           <div className="actions">
             <button
               type="button"
@@ -413,19 +419,24 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
               disabled={busy}
               onClick={() => void importKmz()}
             >
-              Добавить KML / KMZ…
+              Добавить файлы KML / KMZ…
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy}
+              onClick={() => void importKmzFromFolder()}
+            >
+              Добавить из папки…
             </button>
             <button type="button" className="btn" disabled={busy} onClick={() => void reindex()}>
               Переиндексировать базу
             </button>
           </div>
-          <div className="muted">
-            Новый импорт <strong>добавляет</strong> файлы к уже загруженным. Чтобы заменить файл —
-            удалите старый в списке ниже и импортируйте новый. Повторный импорт того же пути
-            обновляет только его точки.
-          </div>
           {sources.length === 0 ? (
-            <div className="status-banner">Файлы карт ещё не загружены</div>
+            <div className="status-banner warn">
+              Файлы водоисточников ещё не загружены — используйте кнопки выше
+            </div>
           ) : (
             <div className="source-list">
               {sources.map((s) => (
@@ -455,7 +466,7 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
           <div className="row">
             <input
               value={cityQuery}
-              placeholder="Начните вводить: Кемерово…"
+              placeholder="Введите название города"
               onChange={(e) => {
                 setCityQuery(e.target.value);
                 setShowHints(true);
@@ -490,81 +501,66 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
               ))}
             </div>
           )}
-          <div className="muted">
-            Введите название и Enter / «Найти», либо выберите подсказку. Сейчас:{" "}
-            <strong>{form.default_city}</strong> ({form.default_lat.toFixed(4)},{" "}
-            {form.default_lon.toFixed(4)}). Поиск адресов и объектов ограничен радиусом{" "}
-            <strong>50 км</strong> вокруг этого города.
+          {form.default_city ? (
+            <div className="muted">
+              Сейчас: <strong>{form.default_city}</strong> ({form.default_lat.toFixed(4)},{" "}
+              {form.default_lon.toFixed(4)}). Поиск адресов ограничен радиусом{" "}
+              <strong>50 км</strong> вокруг этого города.
+            </div>
+          ) : (
+            <div className="muted">
+              Укажите город для поиска адресов (радиус 50 км).
+            </div>
+          )}
+        </div>
+
+        <div className="field">
+          <div className="row">
+            <input
+              value={packCityName}
+              placeholder="Город для скачивания карты"
+              onChange={(e) => setPackCityName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void preparePack();
+                }
+              }}
+            />
+            <input
+              type="number"
+              min={5}
+              max={35}
+              step={1}
+              value={packRadiusKm}
+              title="Радиус покрытия, км"
+              style={{ maxWidth: 90 }}
+              onChange={(e) => setPackRadiusKm(Number(e.target.value) || 16)}
+            />
+            <span className="muted" style={{ whiteSpace: "nowrap" }}>
+              км
+            </span>
           </div>
-        </div>
-
-        <div className="field">
-          <label>Провайдер карты</label>
-          <select
-            value={form.map_provider}
-            onChange={(e) =>
-              setForm({ ...form, map_provider: e.target.value as MapProviderId })
-            }
-          >
-            <option value="local">Локальная OSM (пакет города)</option>
-            <option value="yandex">Яндекс.Карты (нужен ключ)</option>
-            <option value="dgis">2ГИС (нужен ключ)</option>
-            <option value="osm">OpenStreetMap онлайн</option>
-          </select>
-        </div>
-
-        <div className="field">
-          <label>Пакет локальной карты города</label>
-          <select
-            value={packCityId}
-            onChange={(e) => setPackCityId(e.target.value)}
-          >
-            {mapCities.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
           <div className="actions" style={{ marginTop: "0.5rem" }}>
             <button
               type="button"
               className="btn primary"
-              disabled={busy}
+              disabled={busy || packDownloading}
               onClick={() => void preparePack()}
             >
-              Скачать / подготовить пакет
+              {packDownloading ? "Скачивается…" : "Скачать"}
             </button>
             <button
               type="button"
               className="btn"
-              disabled={busy}
-              onClick={() => void api.cancelMapPackage()}
+              disabled={!packDownloading}
+              onClick={() => {
+                void api.cancelMapPackage();
+                setMessage("Отмена скачивания…");
+                setMessageOk(false);
+              }}
             >
               Отменить
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={busy}
-              onClick={() => void importPack()}
-            >
-              Загрузить ZIP…
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={busy}
-              onClick={() => void pickPackFolder()}
-            >
-              Выбрать папку…
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={busy || !form.local_map_path}
-              onClick={() => void exportPack()}
-            >
-              Сохранить ZIP…
             </button>
           </div>
           {packProgress && !packProgress.done && (
@@ -595,12 +591,11 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
           )}
           {form.local_map_path ? (
             <div className="status-banner ok">
-              Активный пакет: <strong>{form.default_city}</strong> — {form.local_map_path}
+              Активный пакет: <strong>{form.default_city || packCityName}</strong>
             </div>
           ) : (
             <div className="status-banner warn">
-              Пакет не выбран. Выберите город и нажмите «Скачать / подготовить пакет» (нужен
-              интернет один раз).
+              Карта ещё не скачана. Введите город и нажмите «Скачать».
             </div>
           )}
           {packages.length > 0 && (
@@ -610,50 +605,8 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
                 .filter((p) => p.ready)
                 .map((p) => p.name)
                 .join(", ") || "—"}
-              . Чтобы переключиться — выберите город и снова «Скачать» (догрузит недостающее) или
-              укажите папку пакета.
             </div>
           )}
-        </div>
-
-        <div className="field">
-          <label>API-ключ Яндекс</label>
-          <div className="row">
-            <input
-              value={form.yandex_api_key}
-              onChange={(e) => setForm({ ...form, yandex_api_key: e.target.value })}
-              placeholder="вставьте ключ и нажмите «Сохранить»"
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <button className="btn primary" type="submit" disabled={busy}>
-              Сохранить
-            </button>
-          </div>
-          <div className="muted">
-            Сервис на developer.tech.yandex.ru: <strong>«JavaScript API и HTTP Геокодер»</strong>.
-            После сохранения откройте вкладку «Карта». Если карта пустая — проверьте, что у ключа
-            разрешён этот сервис и нет ограничений по HTTP Referer.
-          </div>
-          {form.yandex_api_key.trim() ? (
-            <div className="status-banner ok">
-              Ключ введён ({form.yandex_api_key.trim().length} символов)
-              {dirty ? " — ещё не сохранён" : " — сохранён в настройках"}
-            </div>
-          ) : (
-            <div className="status-banner warn">Ключ не введён</div>
-          )}
-        </div>
-
-        <div className="field">
-          <label>API-ключ 2ГИС (необязательно)</label>
-          <input
-            value={form.dgis_api_key}
-            onChange={(e) => setForm({ ...form, dgis_api_key: e.target.value })}
-            placeholder="для карт 2ГИС"
-            spellCheck={false}
-            autoComplete="off"
-          />
         </div>
 
         <div className="actions">
