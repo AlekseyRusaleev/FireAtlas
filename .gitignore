@@ -34,3 +34,10 @@ tsconfig.tsbuildinfo
 
 dist-app/
 
+# Local build artifacts (do not commit)
+fire-atlas.exe
+WebView2Loader.dll
+*.exe
+*.dll
+!src-tauri/**/*.dll
+
