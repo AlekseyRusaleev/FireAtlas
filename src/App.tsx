@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { MapPage } from "./features/map/MapPage";
 import { CardsPage } from "./features/cards/CardsPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
+import { AboutPage } from "./features/about/AboutPage";
 import * as api from "./shared/api";
 import type { AppSettings, IndexStats, TabId } from "./shared/types";
 
@@ -84,6 +85,12 @@ export default function App() {
           >
             Настройки
           </button>
+          <button
+            className={`tab ${tab === "about" ? "active" : ""}`}
+            onClick={() => setTab("about")}
+          >
+            О программе
+          </button>
         </nav>
         <div className="topbar-stats">
           {stats
@@ -119,6 +126,7 @@ export default function App() {
             onOpenMap={() => setTab("map")}
           />
         )}
+        {tab === "about" && <AboutPage />}
       </main>
     </div>
   );

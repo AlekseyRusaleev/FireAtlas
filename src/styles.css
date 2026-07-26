@@ -566,6 +566,30 @@ button {
   text-align: center;
 }
 
+.about-layout {
+  display: block;
+  padding: 2rem 2.5rem;
+  overflow: auto;
+}
+
+.about-card {
+  max-width: 36rem;
+  line-height: 1.55;
+  font-size: 1.05rem;
+}
+
+.about-card p {
+  margin: 0 0 0.65rem;
+}
+
+.about-card .about-gap {
+  margin-top: 1.25rem;
+}
+
+.about-card a {
+  color: #7eb6ff;
+}
+
 @media (max-width: 1100px) {
   .map-layout {
     grid-template-columns: 280px 1fr;
