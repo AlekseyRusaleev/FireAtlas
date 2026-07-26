@@ -3,6 +3,8 @@ import type {
   AppSettings,
   Card,
   IndexStats,
+  MapCity,
+  MapPackageInfo,
   MarkersState,
   NearbyPoint,
   ReindexReport,
@@ -132,4 +134,32 @@ export async function readFileBase64(path: string): Promise<string> {
 
 export async function pickDataFolder(): Promise<string | null> {
   return invoke("pick_data_folder");
+}
+
+export async function listMapCities(): Promise<MapCity[]> {
+  return invoke("list_map_cities");
+}
+
+export async function listMapPackages(): Promise<MapPackageInfo[]> {
+  return invoke("list_map_packages");
+}
+
+export async function prepareMapPackage(cityId: string): Promise<MapPackageInfo> {
+  return invoke("prepare_map_package", { cityId });
+}
+
+export async function cancelMapPackage(): Promise<void> {
+  return invoke("cancel_map_package");
+}
+
+export async function importMapPackageZip(): Promise<MapPackageInfo> {
+  return invoke("import_map_package_zip");
+}
+
+export async function exportMapPackageZip(packagePath?: string): Promise<string> {
+  return invoke("export_map_package_zip", { packagePath: packagePath ?? null });
+}
+
+export async function pickMapPackageFolder(): Promise<MapPackageInfo> {
+  return invoke("pick_map_package_folder");
 }

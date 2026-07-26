@@ -1,6 +1,7 @@
 mod db;
 mod indexer;
 mod kml;
+mod local_map;
 mod markers;
 mod settings;
 
@@ -9,6 +10,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use settings::{AppSettings, SettingsStore};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -16,6 +18,7 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     pub store: SettingsStore,
     pub db: Mutex<Db>,
+    pub map_pack_cancel: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,6 +542,177 @@ fn pick_data_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     Ok(folder.and_then(|p| p.into_path().ok().map(|path| path.to_string_lossy().into_owned())))
 }
 
+#[tauri::command]
+fn list_map_cities() -> Vec<local_map::MapCity> {
+    local_map::cities()
+}
+
+#[tauri::command]
+fn list_map_packages(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<local_map::MapPackageInfo>, String> {
+    let data_path = state.settings.lock().data_path.clone();
+    if data_path.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    local_map::list_packages(PathBuf::from(data_path).as_path())
+}
+
+#[tauri::command]
+async fn prepare_map_package(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    city_id: String,
+) -> Result<local_map::MapPackageInfo, String> {
+    let data_path = state.settings.lock().data_path.clone();
+    if data_path.trim().is_empty() {
+        return Err("Сначала укажите и сохраните путь к базе".into());
+    }
+    state.map_pack_cancel.store(false, Ordering::Relaxed);
+    let cancel = Arc::clone(&state.map_pack_cancel);
+    let root = PathBuf::from(data_path);
+    let city = city_id.clone();
+    let app2 = app.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        local_map::prepare_package(app2, root, city, cancel)
+    })
+    .await
+    .map_err(|e| format!("поток подготовки карты: {e}"))??;
+
+    // Activate package in settings
+    let mut settings = state.settings.lock().clone();
+    settings.local_map_city_id = info.id.clone();
+    settings.local_map_path = info.path.clone();
+    settings.map_provider = "local".into();
+    settings.default_city = info.name.clone();
+    settings.default_lat = info.lat;
+    settings.default_lon = info.lon;
+    settings.default_zoom = info.zoom;
+    state.store.save(&settings)?;
+    *state.settings.lock() = settings;
+    Ok(info)
+}
+
+#[tauri::command]
+fn cancel_map_package(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.map_pack_cancel.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+async fn import_map_package_zip(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<local_map::MapPackageInfo, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let data_path = state.settings.lock().data_path.clone();
+    if data_path.trim().is_empty() {
+        return Err("Сначала укажите и сохраните путь к базе".into());
+    }
+    let file = app
+        .dialog()
+        .file()
+        .add_filter("Пакет карты", &["zip"])
+        .blocking_pick_file();
+    let Some(file) = file else {
+        return Err("Файл не выбран".into());
+    };
+    let path = file
+        .into_path()
+        .map_err(|e| format!("путь к файлу: {e}"))?;
+    let root = PathBuf::from(data_path);
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        local_map::import_package_zip(&root, &path)
+    })
+    .await
+    .map_err(|e| format!("импорт: {e}"))??;
+
+    let mut settings = state.settings.lock().clone();
+    settings.local_map_city_id = info.id.clone();
+    settings.local_map_path = info.path.clone();
+    settings.map_provider = "local".into();
+    settings.default_city = info.name.clone();
+    settings.default_lat = info.lat;
+    settings.default_lon = info.lon;
+    settings.default_zoom = info.zoom;
+    state.store.save(&settings)?;
+    *state.settings.lock() = settings;
+    Ok(info)
+}
+
+#[tauri::command]
+async fn export_map_package_zip(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    package_path: Option<String>,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let settings = state.settings.lock().clone();
+    let pkg = package_path
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| settings.local_map_path.clone());
+    if pkg.trim().is_empty() {
+        return Err("Нет активного пакета карты".into());
+    }
+    let default_name = format!("{}.zip", settings.local_map_city_id);
+    let save = app
+        .dialog()
+        .file()
+        .set_file_name(&default_name)
+        .add_filter("ZIP", &["zip"])
+        .blocking_save_file();
+    let Some(save) = save else {
+        return Err("Сохранение отменено".into());
+    };
+    let zip_path = save
+        .into_path()
+        .map_err(|e| format!("путь сохранения: {e}"))?;
+    let pkg_path = PathBuf::from(pkg);
+    tauri::async_runtime::spawn_blocking(move || {
+        local_map::export_package_zip(&pkg_path, &zip_path)?;
+        Ok(zip_path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("экспорт: {e}"))?
+}
+
+#[tauri::command]
+fn pick_map_package_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<local_map::MapPackageInfo, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let folder = app.dialog().file().blocking_pick_folder();
+    let Some(folder) = folder else {
+        return Err("Папка не выбрана".into());
+    };
+    let path = folder
+        .into_path()
+        .map_err(|e| format!("путь: {e}"))?;
+    let meta = local_map::read_meta(&path)?;
+    let info = local_map::MapPackageInfo {
+        id: meta.id.clone(),
+        name: meta.name.clone(),
+        path: path.to_string_lossy().into_owned(),
+        lat: meta.lat,
+        lon: meta.lon,
+        zoom: meta.zoom,
+        min_zoom: meta.min_zoom,
+        max_zoom: meta.max_zoom,
+        tile_count: meta.tile_count,
+        ready: true,
+    };
+    let mut settings = state.settings.lock().clone();
+    settings.local_map_city_id = info.id.clone();
+    settings.local_map_path = info.path.clone();
+    settings.map_provider = "local".into();
+    settings.default_city = info.name.clone();
+    settings.default_lat = info.lat;
+    settings.default_lon = info.lon;
+    settings.default_zoom = info.zoom;
+    state.store.save(&settings)?;
+    *state.settings.lock() = settings;
+    Ok(info)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -557,6 +731,7 @@ pub fn run() {
                 settings: Mutex::new(settings),
                 store,
                 db: Mutex::new(db),
+                map_pack_cancel: Arc::new(AtomicBool::new(false)),
             });
             app.manage(state);
             Ok(())
@@ -585,7 +760,14 @@ pub fn run() {
             open_path,
             open_folder,
             read_file_base64,
-            pick_data_folder
+            pick_data_folder,
+            list_map_cities,
+            list_map_packages,
+            prepare_map_package,
+            cancel_map_package,
+            import_map_package_zip,
+            export_map_package_zip,
+            pick_map_package_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

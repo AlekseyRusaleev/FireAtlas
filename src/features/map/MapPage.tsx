@@ -20,6 +20,7 @@ import {
 } from "../../shared/types";
 import { YandexMapView, type SearchPin } from "./YandexMapView";
 import { DgisMapView } from "./DgisMapView";
+import { LocalMapView } from "./LocalMapView";
 import { distanceKm, geocodeAddress } from "./geocode";
 
 L.Icon.Default.mergeOptions({
@@ -675,6 +676,19 @@ export function MapPage({ settings, onOpenCard }: Props) {
           <YandexMapView apiKey={settings.yandex_api_key} {...mapProps} />
         )}
         {provider === "dgis" && <DgisMapView apiKey={settings.dgis_api_key} {...mapProps} />}
+        {provider === "local" && (
+          <LocalMapView
+            packagePath={settings.local_map_path}
+            minZoom={11}
+            maxZoom={15}
+            center={center}
+            zoom={focusZoom || settings.default_zoom}
+            points={points}
+            focusId={focusId}
+            onBoundsChange={onBoundsChangeDebounced}
+            onPointClick={onPointClick}
+          />
+        )}
         {provider === "osm" && (
           <MapContainer
             center={[settings.default_lat, settings.default_lon]}

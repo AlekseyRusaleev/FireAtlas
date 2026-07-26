@@ -1,6 +1,6 @@
 export type WaterType = "hydrant" | "pond" | "tower" | "pier" | "other";
 
-export type MapProviderId = "yandex" | "dgis" | "osm";
+export type MapProviderId = "yandex" | "dgis" | "osm" | "local";
 
 export type TabId = "map" | "cards" | "settings";
 
@@ -13,6 +13,8 @@ export interface AppSettings {
   default_lat: number;
   default_lon: number;
   default_zoom: number;
+  local_map_city_id: string;
+  local_map_path: string;
 }
 
 export interface IndexStats {
@@ -154,3 +156,35 @@ export const CITIES: { name: string; lat: number; lon: number; zoom: number }[] 
   { name: "Хабаровск", lat: 48.4827, lon: 135.0838, zoom: 12 },
   { name: "Владивосток", lat: 43.1155, lon: 131.8855, zoom: 12 },
 ];
+
+export interface MapCity {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+  zoom: number;
+  radius_km: number;
+}
+
+export interface MapPackageInfo {
+  id: string;
+  name: string;
+  path: string;
+  lat: number;
+  lon: number;
+  zoom: number;
+  min_zoom: number;
+  max_zoom: number;
+  tile_count: number;
+  ready: boolean;
+}
+
+export interface MapPackProgress {
+  city_id: string;
+  city_name: string;
+  current: number;
+  total: number;
+  message: string;
+  done: boolean;
+  error: string | null;
+}

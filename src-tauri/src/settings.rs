@@ -20,10 +20,14 @@ pub struct AppSettings {
     pub default_lon: f64,
     #[serde(default = "default_zoom")]
     pub default_zoom: u32,
+    #[serde(default)]
+    pub local_map_city_id: String,
+    #[serde(default)]
+    pub local_map_path: String,
 }
 
 fn default_provider() -> String {
-    "yandex".into()
+    "local".into()
 }
 fn default_city() -> String {
     "Кемерово".into()
@@ -49,6 +53,8 @@ impl Default for AppSettings {
             default_lat: default_lat(),
             default_lon: default_lon(),
             default_zoom: default_zoom(),
+            local_map_city_id: "kemerovo".into(),
+            local_map_path: String::new(),
         }
     }
 }

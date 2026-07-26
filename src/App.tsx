@@ -7,13 +7,15 @@ import type { AppSettings, IndexStats, TabId } from "./shared/types";
 
 const DEFAULT_SETTINGS: AppSettings = {
   data_path: "",
-  map_provider: "yandex",
+  map_provider: "local",
   yandex_api_key: "",
   dgis_api_key: "",
   default_city: "Кемерово",
   default_lat: 55.3549,
   default_lon: 86.0885,
   default_zoom: 12,
+  local_map_city_id: "kemerovo",
+  local_map_path: "",
 };
 
 export default function App() {

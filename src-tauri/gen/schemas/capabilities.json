@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for Fire Atlas","local":true,"windows":["main"],"permissions":["core:default","dialog:default","fs:default"]}}
+{"default":{"identifier":"default","description":"Default capabilities for Fire Atlas","local":true,"windows":["main"],"permissions":["core:default","core:event:default","dialog:default","fs:default"]}}
