@@ -5,6 +5,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import "leaflet/dist/leaflet.css";
 import type { WaterPoint, WaterType } from "../../shared/types";
 import type { SearchPin } from "./YandexMapView";
+import { HouseNumbersLayer } from "./HouseNumbersLayer";
 
 function typeColor(t: WaterType): string {
   switch (t) {
@@ -248,6 +249,7 @@ export function LocalMapView({
       <BoundsWatcher onBounds={onBoundsChange} />
       <MarkersLayer points={points} focusId={focusId} onPointClick={onPointClick} />
       <SearchPinLayer searchPin={searchPin} />
+      <HouseNumbersLayer />
     </MapContainer>
   );
 }

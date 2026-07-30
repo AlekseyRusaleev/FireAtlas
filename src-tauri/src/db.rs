@@ -440,25 +440,56 @@ impl Db {
         let hay = format!("{title_l} {addr_l} {sub_l}");
         let address_query = Self::looks_like_address_query(q);
 
-        let street_tokens: Vec<&str> = q_lower
+        let cleaned: Vec<String> = q_lower
             .split_whitespace()
             .filter(|t| {
                 let chars = t.chars().count();
-                chars >= 3 && !t.chars().all(|c| c.is_ascii_digit())
+                chars >= 3
+                    && !t.chars().all(|c| c.is_ascii_digit())
+                    && ![
+                        "улица",
+                        "ул",
+                        "проспект",
+                        "пр-т",
+                        "пр.",
+                        "переулок",
+                        "пер",
+                        "шоссе",
+                        "проезд",
+                        "бульвар",
+                        "наб",
+                        "набережная",
+                        "площадь",
+                        "пл",
+                        "дом",
+                        "город",
+                        "микрорайон",
+                        "мкр",
+                    ]
+                    .contains(t)
             })
+            .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+            .filter(|t| t.chars().count() >= 3)
             .collect();
+        let street_tokens: Vec<&str> = cleaned.iter().map(|s| s.as_str()).collect();
         let street_hits = street_tokens
             .iter()
             .filter(|t| hay.contains(*t))
             .count() as i32;
         let house_in_text = query_number
             .map(|n| {
-                // номер дома рядом с улицей, а не только «ИК №N»
-                addr_l.contains(n)
-                    || title_l.contains(n)
-                    || hay.contains(&format!(", {n}"))
-                    || hay.contains(&format!(" {n}"))
-                    || hay.ends_with(n)
+                // номер дома как отдельный фрагмент, а не «ИК №N» / часть другого числа
+                let patterns = [
+                    format!(", {n}"),
+                    format!(",{n}"),
+                    format!(" {n}"),
+                    format!("д.{n}"),
+                    format!("д {n}"),
+                    format!("дом {n}"),
+                ];
+                patterns.iter().any(|p| hay.contains(p))
+                    || addr_l.ends_with(n)
+                    || title_l.ends_with(n)
             })
             .unwrap_or(false);
 
@@ -1083,6 +1114,27 @@ impl Db {
             out.push(row.map_err(|e| e.to_string())?);
         }
         Ok(out)
+    }
+
+    pub fn latest_source_path(&self) -> Result<Option<String>, String> {
+        self.conn
+            .query_row(
+                "SELECT path FROM sources WHERE kind IN ('kml','kmz') ORDER BY mtime DESC, id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn is_source_path(&self, path: &str) -> Result<bool, String> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sources WHERE path=?1 AND kind IN ('kml','kmz'))",
+                params![path],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
     }
 
     pub fn delete_source(&self, id: i64) -> Result<(), String> {

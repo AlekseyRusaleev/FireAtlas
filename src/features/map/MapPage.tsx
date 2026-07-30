@@ -20,8 +20,15 @@ import {
   type WaterType,
 } from "../../shared/types";
 import { LocalMapView } from "./LocalMapView";
+import { HouseNumbersLayer } from "./HouseNumbersLayer";
 import type { SearchPin } from "./YandexMapView";
-import { distanceKm, geocodeAddress } from "./geocode";
+import {
+  distanceKm,
+  geocodeAddress,
+  parseAddressQuery,
+  suggestAddresses,
+  type AddressSuggestion,
+} from "./geocode";
 
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: markerIcon2x,
@@ -37,6 +44,20 @@ const SEARCH_RADIUS_KM = 50;
 const MAP_POINTS_LIMIT = 800;
 
 type SideMode = "search" | "history" | "favorites" | "markers";
+
+function addressFromDescription(raw?: string | null): string | null {
+  if (!raw) return null;
+  const text = raw
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\r/g, "");
+  const match = text.match(
+    /(?:Улица\s*\(наименование объекта\)|Адрес)\s*:\s*([^\n]+?)(?=\s+(?:Техническое состояние|Характер неисправности|Дата последней|Принадлежность|Координаты|Место нахождения|Расстояние)|$)/i
+  );
+  return match?.[1]?.trim() || null;
+}
 
 function isLikelyAddress(query: string): boolean {
   return (
@@ -79,6 +100,45 @@ function addressFromCardTitle(title: string): string | null {
   if (guillemet >= 0) {
     const tail = title.slice(guillemet + 1).replace(/^[\s,]+/, "").trim();
     if (tail.length > 5) return tail;
+  }
+  return null;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hitMatchesAddress(hit: SearchHit, streetTokens: string[], house: string | null): boolean {
+  const hay = `${hit.title} ${hit.address || ""} ${hit.subtitle || ""}`.toLowerCase();
+  if (house) {
+    const re = new RegExp(`(^|[^0-9])${escapeRegExp(house)}([^0-9а-яa-z]|$)`, "i");
+    if (!re.test(hay)) return false;
+  }
+  if (streetTokens.length > 0) {
+    // Достаточно одного совпадения по улице: в ИК часто только «Ленина 62б» без города/типа улицы
+    const streetHit = streetTokens.some((t) => hay.includes(t));
+    if (!streetHit) return false;
+  }
+  return streetTokens.length > 0 || Boolean(house);
+}
+
+function nearbyToSearchHit(n: NearbyPoint): SearchHit {
+  return {
+    id: n.id,
+    kind: "water",
+    title: n.name,
+    subtitle: `${Math.round(n.distance_m)} м`,
+    water_type: n.water_type,
+    lat: n.lat,
+    lon: n.lon,
+    distance_m: n.distance_m,
+  };
+}
+
+function addressFromSubtitle(subtitle: string): string | null {
+  const parts = subtitle.split("·").map((s) => s.trim()).filter(Boolean);
+  for (const part of parts) {
+    if (/\d/.test(part) && !/^№/i.test(part)) return part;
   }
   return null;
 }
@@ -216,6 +276,8 @@ interface Props {
 export function MapPage({ settings, onOpenCard }: Props) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
+  const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [points, setPoints] = useState<WaterPoint[]>([]);
   const [selected, setSelected] = useState<SearchHit | null>(null);
   const [water, setWater] = useState<WaterPoint | null>(null);
@@ -253,6 +315,10 @@ export function MapPage({ settings, onOpenCard }: Props) {
     if (!raw || !hasReadableText(raw)) return null;
     return sanitizeDescription(raw);
   }, [water?.description]);
+  const visibleAddress = useMemo(
+    () => selected?.address || water?.address || addressFromDescription(water?.description),
+    [selected?.address, water?.address, water?.description]
+  );
 
   async function refreshLists() {
     const [h, f] = await Promise.all([api.getHistory(15), api.getFavorites()]);
@@ -393,6 +459,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
     const candidates = [
       card?.address,
       hit.address,
+      addressFromSubtitle(hit.subtitle),
       addressFromCardTitle(card?.title || hit.title),
       fallbackQuery?.trim(),
       query.trim(),
@@ -436,16 +503,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
     setGeoBusy(true);
     setGeoError(null);
     try {
-      const indexed = await api.search(q, ALL_TYPES, 80);
-      const cards = indexed.filter((h) => h.kind === "card");
-      if (cards.length > 0) {
-        setHits(indexed.slice(0, 40));
-        setActiveIndex(0);
-        setSideMode("search");
-        await selectHit(cards[0], q);
-        return;
-      }
-
+      const parsed = parseAddressQuery(q);
       const found = await geocodeAddress(
         normalizeAddressForGeocode(q, settings.default_city),
         settings.yandex_api_key,
@@ -459,27 +517,87 @@ export function MapPage({ settings, onOpenCard }: Props) {
       setSearchPin(found);
       setFocusId(null);
       moveTo(found.lat, found.lon, ADDRESS_ZOOM);
-      setNearby(await api.nearby(found.lat, found.lon, 8, ALL_TYPES));
+      const nearbyPoints = await api.nearby(found.lat, found.lon, 8, ALL_TYPES);
+      setNearby(nearbyPoints);
+      setSelected(null);
+      setWater(null);
+      setSideMode("search");
 
-      const byAddr = (await api.search(found.label, ALL_TYPES, 40)).filter(
-        (h) => h.kind === "card"
+      const geocodedParsed = parseAddressQuery(found.label);
+      const compactParts = [
+        ...(parsed.streetTokens.length ? parsed.streetTokens : geocodedParsed.streetTokens),
+        parsed.house || geocodedParsed.house || "",
+      ].filter(Boolean);
+      const compactQuery = compactParts.join(" ");
+
+      const searches = [q, found.label, compactQuery].filter(
+        (s, i, arr) => s.trim().length > 0 && arr.indexOf(s) === i
       );
-      if (byAddr.length > 0) {
-        const rest = indexed.filter((h) => h.kind !== "card");
-        setHits([...byAddr, ...rest].slice(0, 40));
-        setActiveIndex(0);
-        await selectHit(byAddr[0], found.label);
-      } else {
-        setSelected(null);
-        setWater(null);
-        setHits(indexed.slice(0, 40));
+      const batches = await Promise.all(searches.map((s) => api.search(s, ALL_TYPES, 80)));
+
+      const cardMap = new Map<number, SearchHit>();
+      for (const hit of batches.flat()) {
+        if (hit.kind !== "card") continue;
+        if (
+          hitMatchesAddress(hit, parsed.streetTokens, parsed.house) ||
+          hitMatchesAddress(hit, geocodedParsed.streetTokens, geocodedParsed.house) ||
+          (compactParts.length > 0 &&
+            hitMatchesAddress(
+              hit,
+              parsed.streetTokens.length ? parsed.streetTokens : geocodedParsed.streetTokens,
+              parsed.house || geocodedParsed.house
+            ))
+        ) {
+          cardMap.set(hit.id, hit);
+        }
       }
+
+      const cards = [...cardMap.values()];
+      const waters = nearbyPoints.map(nearbyToSearchHit);
+      setHits([...cards, ...waters].slice(0, 40));
+      setActiveIndex(0);
     } catch (e) {
       setSearchPin(null);
       setGeoError(e instanceof Error ? e.message : String(e));
+      setHits([]);
+      setNearby([]);
     } finally {
       setGeoBusy(false);
     }
+  }
+
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 3 || !isLikelyAddress(q)) {
+      setSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void suggestAddresses(q, {
+        lat: settings.default_lat,
+        lon: settings.default_lon,
+        city: settings.default_city,
+        radiusKm: SEARCH_RADIUS_KM,
+      })
+        .then((items) => {
+          if (!cancelled) setSuggestions(items);
+        })
+        .catch(() => {
+          if (!cancelled) setSuggestions([]);
+        });
+    }, 220);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [query, settings.default_city, settings.default_lat, settings.default_lon]);
+
+  function applySuggestion(label: string) {
+    setQuery(label);
+    setSuggestions([]);
+    setShowSuggestions(false);
+    void findAddress(label);
   }
 
   function onSearchKeyDown(e: KeyboardEvent<HTMLInputElement>) {
@@ -497,15 +615,17 @@ export function MapPage({ settings, onOpenCard }: Props) {
     }
     if (e.key === "Enter") {
       e.preventDefault();
-      const hit = sideList[activeIndex] ?? sideList[0];
-      if (hit?.kind === "card") {
-        void selectHit(hit, query);
+      // Для адресного запроса всегда геокодируем набранный текст,
+      // а не открываем первую карточку из FTS (там часто чужой № дома / ИК).
+      if (sideMode === "search" && isLikelyAddress(query)) {
+        void findAddress(query);
         return;
       }
-      if (sideMode === "search" && (isLikelyAddress(query) || !hit)) {
-        void findAddress(query);
-      } else if (hit) {
+      const hit = sideList[activeIndex] ?? sideList[0];
+      if (hit) {
         void selectHit(hit, query);
+      } else if (sideMode === "search") {
+        void findAddress(query);
       }
     }
   }
@@ -542,7 +662,13 @@ export function MapPage({ settings, onOpenCard }: Props) {
     }
     try {
       applyMarkers(
-        await api.addMarker(draftName, draftComment.trim() || null, draft.lat, draft.lon)
+        await api.addMarker(
+          draftName,
+          draftComment.trim() || null,
+          draft.lat,
+          draft.lon,
+          water?.source_path
+        )
       );
       setDraft(null);
       setDraftName("");
@@ -575,17 +701,39 @@ export function MapPage({ settings, onOpenCard }: Props) {
   return (
     <div className="panel map-layout">
       <aside className="side">
-        <input
-          id="global-search"
-          className="search-box"
-          placeholder={`Адрес в ${settings.default_city || "городе"} (±${SEARCH_RADIUS_KM} км)…`}
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setSideMode("search");
-          }}
-          onKeyDown={onSearchKeyDown}
-        />
+        <div className="city-field">
+          <input
+            id="global-search"
+            className="search-box"
+            placeholder={`Адрес в ${settings.default_city || "городе"} (±${SEARCH_RADIUS_KM} км)…`}
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setSideMode("search");
+              setShowSuggestions(true);
+            }}
+            onFocus={() => setShowSuggestions(true)}
+            onBlur={() => {
+              window.setTimeout(() => setShowSuggestions(false), 150);
+            }}
+            onKeyDown={onSearchKeyDown}
+          />
+          {showSuggestions && suggestions.length > 0 && (
+            <div className="city-hints">
+              {suggestions.map((item) => (
+                <button
+                  key={item.label}
+                  type="button"
+                  className="city-hint"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => applySuggestion(item.label)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <div className="actions">
           <button
             type="button"
@@ -725,9 +873,18 @@ export function MapPage({ settings, onOpenCard }: Props) {
 
             <div className="muted" style={{ fontSize: "0.8rem" }}>
               {markerFile
-                ? `Файл меток: ${markerFile.path}`
-                : "Укажите путь к базе в настройках — тогда метки будут дублироваться в KML-файл."}
+                ? `Метки записаны в рабочий файл: ${markerFile.path}`
+                : "Добавьте KML/KMZ в настройках — пользовательские метки будут записываться прямо в рабочий файл карты."}
             </div>
+            {markerFile && (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void api.openFolder(markerFile.path)}
+              >
+                Открыть папку файла меток
+              </button>
+            )}
           </div>
         ) : (
           <div className="results">
@@ -815,6 +972,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
             <FlyTo center={center} zoom={focusZoom} />
             <MapClickCatcher enabled={pickMode} onPick={(lat, lon) => startDraft(lat, lon)} />
             <BoundsLoader types={ALL_TYPES} onPoints={setPoints} />
+            <HouseNumbersLayer />
             {points.map((p) => (
               <Marker
                 key={p.id}
@@ -858,7 +1016,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
 
         {!selected && searchPin && (
           <>
-            <h2>{searchPin.label}</h2>
+            <h2 className="address-emphasis">{searchPin.label}</h2>
             <dl>
               <div>
                 <dt>Тип</dt>
@@ -903,7 +1061,9 @@ export function MapPage({ settings, onOpenCard }: Props) {
               </div>
               <div>
                 <dt>Адрес</dt>
-                <dd>{selected.address || water?.address || "—"}</dd>
+                <dd className={visibleAddress ? "address-emphasis" : undefined}>
+                  {visibleAddress || "—"}
+                </dd>
               </div>
               <div>
                 <dt>Координаты</dt>

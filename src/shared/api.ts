@@ -115,9 +115,10 @@ export async function addMarker(
   name: string,
   comment: string | null,
   lat: number,
-  lon: number
+  lon: number,
+  sourcePath?: string | null
 ): Promise<MarkersState> {
-  return invoke("add_marker", { name, comment, lat, lon });
+  return invoke("add_marker", { name, comment, lat, lon, sourcePath: sourcePath ?? null });
 }
 
 export async function deleteMarker(id: number): Promise<MarkersState> {

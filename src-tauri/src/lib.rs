@@ -481,23 +481,50 @@ fn get_favorites(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<SearchHit
 
 /// Отдаёт метки из БД и, при необходимости, обновляет KML-файл рядом с базой.
 /// Блокировки берём по очереди: parking_lot::Mutex не реентрантный.
-fn markers_state(state: &AppState, force_write: bool) -> Result<MarkersState, String> {
-    let list = state.db.lock().list_user_markers()?;
-    let data_path = state.settings.lock().data_path.clone();
+fn markers_state(
+    state: &AppState,
+    preferred_source: Option<&str>,
+    force_write: bool,
+) -> Result<MarkersState, String> {
+    let db = state.db.lock();
+    let list = db.list_user_markers()?;
+    let preferred = preferred_source.map(str::trim).filter(|p| !p.is_empty());
+    let selected_source = if let Some(path) = preferred {
+        if !db.is_source_path(path)? {
+            return Err("Выбранный объект не относится к загруженному рабочему KML/KMZ".into());
+        }
+        db.set_meta("active_marker_source", path)?;
+        Some(path.to_string())
+    } else if let Some(path) = db.get_meta("active_marker_source")? {
+        if db.is_source_path(&path)? && PathBuf::from(&path).exists() {
+            Some(path)
+        } else {
+            db.latest_source_path()?
+        }
+    } else {
+        db.latest_source_path()?
+    };
+    drop(db);
 
-    let Some(path) = markers::markers_file_path(&data_path) else {
+    let Some(path_string) = selected_source else {
+        let has_markers = !list.is_empty();
         return Ok(MarkersState {
             markers: list,
             file: None,
-            file_error: None,
+            file_error: if force_write && has_markers {
+                Some("Нет загруженного рабочего KML/KMZ для записи меток".into())
+            } else {
+                None
+            },
         });
     };
+    let path = PathBuf::from(path_string);
 
     // При обычном чтении файл не перезаписываем — только восстанавливаем, если он исчез.
     // Метка уже в базе, поэтому недоступный сетевой диск не должен ломать сохранение.
     let mut file_error = None;
-    if force_write || (!path.exists() && !list.is_empty()) {
-        if let Err(e) = markers::write_markers_kml(&path, &list) {
+    if force_write {
+        if let Err(e) = markers::write_markers_to_source(&path, &list) {
             file_error = Some(e);
         }
     }
@@ -528,7 +555,7 @@ fn delete_source(
 
 #[tauri::command]
 fn list_markers(state: tauri::State<'_, Arc<AppState>>) -> Result<MarkersState, String> {
-    markers_state(&state, true)
+    markers_state(&state, None, false)
 }
 
 #[tauri::command]
@@ -538,6 +565,7 @@ fn add_marker(
     comment: Option<String>,
     lat: f64,
     lon: f64,
+    source_path: Option<String>,
 ) -> Result<MarkersState, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -556,7 +584,7 @@ fn add_marker(
         .lock()
         .add_user_marker(name, comment.as_deref(), lat, lon, &created_at)?;
 
-    markers_state(&state, true)
+    markers_state(&state, source_path.as_deref(), true)
 }
 
 #[tauri::command]
@@ -565,7 +593,7 @@ fn delete_marker(
     id: i64,
 ) -> Result<MarkersState, String> {
     state.db.lock().delete_user_marker(id)?;
-    markers_state(&state, true)
+    markers_state(&state, None, true)
 }
 
 #[tauri::command]
