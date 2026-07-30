@@ -28,6 +28,10 @@ function normalize(form: AppSettings): AppSettings {
     default_city: form.default_city.trim(),
     local_map_city_id: form.local_map_city_id?.trim() || "",
     local_map_path: form.local_map_path?.trim() || "",
+    infocard_api_base:
+      form.infocard_api_base?.trim() || "https://infocardmchs.ru/api",
+    infocard_enabled: !!form.infocard_enabled,
+    infocard_login: form.infocard_login?.trim() || "",
   };
 }
 
@@ -408,6 +412,27 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
               Обзор…
             </button>
           </div>
+        </div>
+
+        <div className="field">
+          <label>Infocard API (серверные карточки)</label>
+          <input
+            value={form.infocard_api_base || ""}
+            onChange={(e) =>
+              setForm({ ...form, infocard_api_base: e.target.value })
+            }
+            placeholder="https://infocardmchs.ru/api"
+          />
+          <label className="row" style={{ marginTop: 8, gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={!!form.infocard_enabled}
+              onChange={(e) =>
+                setForm({ ...form, infocard_enabled: e.target.checked })
+              }
+            />
+            Включить режим Infocard (вкладка «Infocard»)
+          </label>
         </div>
 
         <div className="field">

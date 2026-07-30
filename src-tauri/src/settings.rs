@@ -24,6 +24,17 @@ pub struct AppSettings {
     pub local_map_city_id: String,
     #[serde(default)]
     pub local_map_path: String,
+    /// Infocard API base, e.g. https://infocardmchs.ru/api
+    #[serde(default = "default_infocard_api")]
+    pub infocard_api_base: String,
+    #[serde(default)]
+    pub infocard_enabled: bool,
+    #[serde(default)]
+    pub infocard_login: String,
+}
+
+fn default_infocard_api() -> String {
+    "https://infocardmchs.ru/api".into()
 }
 
 fn default_provider() -> String {
@@ -55,6 +66,9 @@ impl Default for AppSettings {
             default_zoom: default_zoom(),
             local_map_city_id: String::new(),
             local_map_path: String::new(),
+            infocard_api_base: default_infocard_api(),
+            infocard_enabled: false,
+            infocard_login: String::new(),
         }
     }
 }

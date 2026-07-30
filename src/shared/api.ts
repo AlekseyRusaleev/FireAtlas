@@ -181,3 +181,41 @@ export async function exportMapPackageZip(packagePath?: string): Promise<string>
 export async function pickMapPackageFolder(): Promise<MapPackageInfo> {
   return invoke("pick_map_package_folder");
 }
+
+export interface InfocardSession {
+  access_token: string;
+  login: string;
+}
+
+export interface InfocardFileHit {
+  id: string;
+  name: string;
+  status?: string | null;
+}
+
+export async function infocardGetSession(): Promise<InfocardSession> {
+  return invoke("infocard_get_session");
+}
+
+export async function infocardLogin(
+  login: string,
+  password: string
+): Promise<InfocardSession> {
+  return invoke("infocard_login", { login, password });
+}
+
+export async function infocardLogout(): Promise<void> {
+  return invoke("infocard_logout");
+}
+
+export async function infocardSearchFiles(
+  query: string,
+  limit = 50
+): Promise<InfocardFileHit[]> {
+  return invoke("infocard_search_files", { query, limit });
+}
+
+export async function infocardOpenPdf(fileId: string): Promise<string> {
+  return invoke("infocard_open_pdf", { fileId });
+}
+

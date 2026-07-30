@@ -1,5 +1,6 @@
 mod db;
 mod indexer;
+mod infocard;
 mod kml;
 mod local_map;
 mod markers;
@@ -933,7 +934,12 @@ pub fn run() {
             cancel_map_package,
             import_map_package_zip,
             export_map_package_zip,
-            pick_map_package_folder
+            pick_map_package_folder,
+            infocard::infocard_get_session,
+            infocard::infocard_login,
+            infocard::infocard_logout,
+            infocard::infocard_search_files,
+            infocard::infocard_open_pdf
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

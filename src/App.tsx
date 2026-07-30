@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { MapPage } from "./features/map/MapPage";
 import { CardsPage } from "./features/cards/CardsPage";
+import { InfocardPage } from "./features/infocard/InfocardPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { AboutPage } from "./features/about/AboutPage";
 import * as api from "./shared/api";
@@ -17,6 +18,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   default_zoom: 12,
   local_map_city_id: "",
   local_map_path: "",
+  infocard_api_base: "https://infocardmchs.ru/api",
+  infocard_enabled: false,
+  infocard_login: "",
 };
 
 export default function App() {
@@ -80,6 +84,12 @@ export default function App() {
             Информационные карточки
           </button>
           <button
+            className={`tab ${tab === "infocard" ? "active" : ""}`}
+            onClick={() => setTab("infocard")}
+          >
+            Infocard
+          </button>
+          <button
             className={`tab ${tab === "settings" ? "active" : ""}`}
             onClick={() => setTab("settings")}
           >
@@ -112,6 +122,7 @@ export default function App() {
           />
         )}
         {tab === "cards" && <CardsPage initialCardId={openCardId} />}
+        {tab === "infocard" && <InfocardPage settings={settings} />}
         {tab === "settings" && (
           <SettingsPage
             settings={settings}

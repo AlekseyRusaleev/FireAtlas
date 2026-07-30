@@ -2,7 +2,7 @@ export type WaterType = "hydrant" | "pond" | "tower" | "pier" | "other";
 
 export type MapProviderId = "yandex" | "dgis" | "osm" | "local";
 
-export type TabId = "map" | "cards" | "settings" | "about";
+export type TabId = "map" | "cards" | "infocard" | "settings" | "about";
 
 export interface AppSettings {
   data_path: string;
@@ -15,6 +15,9 @@ export interface AppSettings {
   default_zoom: number;
   local_map_city_id: string;
   local_map_path: string;
+  infocard_api_base: string;
+  infocard_enabled: boolean;
+  infocard_login: string;
 }
 
 export interface IndexStats {
