@@ -79,7 +79,8 @@ export function CardsPage({ initialCardId = null }: Props) {
   useEffect(() => {
     const t = window.setTimeout(() => {
       void (async () => {
-        const list = await api.listCards(query, 100);
+        // Всего ИК в базе ~240+; 100 обрезало список при пустом поиске.
+        const list = await api.listCards(query, 2000);
         setCards(list);
       })();
     }, 180);
@@ -240,6 +241,9 @@ export function CardsPage({ initialCardId = null }: Props) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
+        <div className="results-meta" style={{ padding: "4px 8px", opacity: 0.7, fontSize: 12 }}>
+          {query.trim() ? `Найдено: ${cards.length}` : `Всего: ${cards.length}`}
+        </div>
         <div className="results">
           {cards.length === 0 && <div className="empty">Карточки не найдены</div>}
           {cards.map((c) => (

@@ -32,7 +32,113 @@ function normalize(form: AppSettings): AppSettings {
       form.infocard_api_base?.trim() || "https://infocardmchs.ru/api",
     infocard_enabled: !!form.infocard_enabled,
     infocard_login: form.infocard_login?.trim() || "",
+    cards_mode: ["local", "server", "both"].includes(form.cards_mode)
+      ? form.cards_mode
+      : "local",
+    markers_mode: ["local", "server"].includes(form.markers_mode)
+      ? form.markers_mode
+      : "local",
   };
+}
+
+function InfocardAuthBlock({
+  loginHint,
+  onLoginSaved,
+}: {
+  loginHint: string;
+  onLoginSaved: (login: string) => void;
+}) {
+  const [login, setLogin] = useState(loginHint || "");
+  const [password, setPassword] = useState("");
+  const [sessionLogin, setSessionLogin] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLogin(loginHint || "");
+  }, [loginHint]);
+
+  useEffect(() => {
+    void api.infocardGetSession().then((s) => {
+      setSessionLogin(s.access_token ? s.login || loginHint || null : null);
+    });
+  }, [loginHint]);
+
+  async function doLogin() {
+    setBusy(true);
+    setError(null);
+    try {
+      const s = await api.infocardLogin(login, password);
+      setSessionLogin(s.login);
+      onLoginSaved(s.login);
+      setPassword("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doLogout() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.infocardLogout();
+      setSessionLogin(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="field">
+      <label>Авторизация Infocard</label>
+      {sessionLogin ? (
+        <div className="row" style={{ alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span className="muted" style={{ fontSize: 14 }}>
+            Авторизовано как <strong>{sessionLogin}</strong>
+          </span>
+          <button type="button" className="btn" disabled={busy} onClick={() => void doLogout()}>
+            Выйти
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 8, maxWidth: 360 }}>
+          <input
+            placeholder="Логин"
+            value={login}
+            onChange={(e) => setLogin(e.target.value)}
+            autoComplete="username"
+          />
+          <input
+            placeholder="Пароль"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void doLogin();
+            }}
+          />
+          <button
+            type="button"
+            className="btn primary"
+            disabled={busy || !login.trim() || !password}
+            onClick={() => void doLogin()}
+          >
+            {busy ? "Вход…" : "Войти"}
+          </button>
+        </div>
+      )}
+      {error && (
+        <div className="error-text" style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap }: Props) {
@@ -415,33 +521,99 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
         </div>
 
         <div className="field">
-          <label>Infocard API (серверные карточки)</label>
-          <input
-            value={form.infocard_api_base || ""}
-            onChange={(e) =>
-              setForm({ ...form, infocard_api_base: e.target.value })
-            }
-            placeholder="https://infocardmchs.ru/api"
-          />
-          <label className="row" style={{ marginTop: 8, gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={!!form.infocard_enabled}
-              onChange={(e) =>
-                setForm({ ...form, infocard_enabled: e.target.checked })
-              }
-            />
-            Включить режим Infocard (вкладка «Infocard»)
-          </label>
+          <label>Источник информационных карточек</label>
+          <select
+            value={form.cards_mode || "local"}
+            onChange={(e) => {
+              const cards_mode = e.target.value;
+              setForm({
+                ...form,
+                cards_mode,
+                infocard_enabled:
+                  cards_mode === "server" || cards_mode === "both"
+                    ? true
+                    : form.infocard_enabled,
+              });
+            }}
+          >
+            <option value="local">Локальная папка (база на диске)</option>
+            <option value="server">Сервер Infocard (API веб-кабинета)</option>
+            <option value="both">Оба источника (поиск на карте)</option>
+          </select>
+          <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
+            Поиск карточек — на главном экране (карта). Локальные файлы открываются во вкладке
+            «Информационные карточки». Схемы Visio/фото на сервере — как PDF после конвертации.
+          </div>
         </div>
 
         <div className="field">
+          <label>Источник водоисточников на карте</label>
+          <select
+            value={form.markers_mode || "local"}
+            onChange={(e) => {
+              const markers_mode = e.target.value;
+              setForm({
+                ...form,
+                markers_mode,
+                infocard_enabled:
+                  markers_mode === "server" ||
+                  form.cards_mode === "server" ||
+                  form.cards_mode === "both"
+                    ? true
+                    : form.infocard_enabled,
+              });
+            }}
+          >
+            <option value="local">Локальный файл (KMZ/KML)</option>
+            <option value="server">Сервер Infocard (веб-кабинет)</option>
+          </select>
+          <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
+            Серверные метки правятся в веб-кабинете. В приложении — только отображение после входа в
+            Infocard.
+          </div>
+        </div>
+
+        {(form.cards_mode === "server" ||
+          form.cards_mode === "both" ||
+          form.markers_mode === "server") && (
+          <>
+            <div className="field">
+              <label>Infocard API</label>
+              <input
+                value={form.infocard_api_base || ""}
+                onChange={(e) =>
+                  setForm({ ...form, infocard_api_base: e.target.value })
+                }
+                placeholder="https://infocardmchs.ru/api"
+              />
+            </div>
+            <InfocardAuthBlock
+              loginHint={form.infocard_login}
+              onLoginSaved={(login) => setForm({ ...form, infocard_login: login })}
+            />
+          </>
+        )}
+
+        <div
+          className="field"
+          style={
+            (form.markers_mode || "local") === "server"
+              ? { opacity: 0.55, pointerEvents: "none" }
+              : undefined
+          }
+        >
           <label>Водоисточники ИППВ (.kml / .kmz)</label>
+          {(form.markers_mode || "local") === "server" && (
+            <div className="muted" style={{ marginBottom: 8, fontSize: 13 }}>
+              Не используется: выбран источник «Сервер Infocard». Переключите на локальный файл,
+              чтобы импортировать KMZ.
+            </div>
+          )}
           <div className="actions">
             <button
               type="button"
               className="btn primary"
-              disabled={busy}
+              disabled={busy || (form.markers_mode || "local") === "server"}
               onClick={() => void importKmz()}
             >
               Добавить файлы KML / KMZ…
@@ -449,12 +621,17 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
             <button
               type="button"
               className="btn primary"
-              disabled={busy}
+              disabled={busy || (form.markers_mode || "local") === "server"}
               onClick={() => void importKmzFromFolder()}
             >
               Добавить из папки…
             </button>
-            <button type="button" className="btn" disabled={busy} onClick={() => void reindex()}>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || (form.markers_mode || "local") === "server"}
+              onClick={() => void reindex()}
+            >
               Переиндексировать базу
             </button>
           </div>

@@ -66,11 +66,23 @@ export async function getWaterPoint(id: number): Promise<WaterPoint | null> {
   return invoke("get_water_point", { id });
 }
 
+export async function deleteWaterPoint(id: number): Promise<void> {
+  return invoke("delete_water_point", { id });
+}
+
+export async function moveWaterPoint(
+  id: number,
+  lat: number,
+  lon: number
+): Promise<WaterPoint> {
+  return invoke("move_water_point", { id, lat, lon });
+}
+
 export async function getCard(id: number): Promise<Card | null> {
   return invoke("get_card", { id });
 }
 
-export async function listCards(query: string, limit = 100): Promise<Card[]> {
+export async function listCards(query: string, limit = 2000): Promise<Card[]> {
   return invoke("list_cards", { query, limit });
 }
 
@@ -111,6 +123,10 @@ export async function listMarkers(): Promise<MarkersState> {
   return invoke("list_markers");
 }
 
+export async function infocardListMarkers(): Promise<MarkersState> {
+  return invoke("infocard_list_markers");
+}
+
 export async function addMarker(
   name: string,
   comment: string | null,
@@ -119,6 +135,16 @@ export async function addMarker(
   sourcePath?: string | null
 ): Promise<MarkersState> {
   return invoke("add_marker", { name, comment, lat, lon, sourcePath: sourcePath ?? null });
+}
+
+export async function updateMarker(
+  id: number,
+  name: string,
+  comment: string | null,
+  lat: number,
+  lon: number
+): Promise<MarkersState> {
+  return invoke("update_marker", { id, name, comment, lat, lon });
 }
 
 export async function deleteMarker(id: number): Promise<MarkersState> {
@@ -184,6 +210,7 @@ export async function pickMapPackageFolder(): Promise<MapPackageInfo> {
 
 export interface InfocardSession {
   access_token: string;
+  refresh_token?: string;
   login: string;
 }
 
@@ -191,6 +218,7 @@ export interface InfocardFileHit {
   id: string;
   name: string;
   status?: string | null;
+  kind?: string | null;
 }
 
 export async function infocardGetSession(): Promise<InfocardSession> {
@@ -217,5 +245,35 @@ export async function infocardSearchFiles(
 
 export async function infocardOpenPdf(fileId: string): Promise<string> {
   return invoke("infocard_open_pdf", { fileId });
+}
+
+export interface PortableArtifact {
+  url: string;
+  sha256: string;
+}
+
+export interface UpdateManifest {
+  version: string;
+  notes: string;
+  publishedAt: string;
+  portable: PortableArtifact;
+}
+
+export interface UpdateCheckResult {
+  currentVersion: string;
+  updateAvailable: boolean;
+  latest: UpdateManifest | null;
+}
+
+export async function getAppVersion(): Promise<string> {
+  return invoke("get_app_version");
+}
+
+export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  return invoke("check_for_updates");
+}
+
+export async function downloadAndApplyUpdate(url: string, sha256: string): Promise<void> {
+  return invoke("download_and_apply_update", { url, sha256 });
 }
 

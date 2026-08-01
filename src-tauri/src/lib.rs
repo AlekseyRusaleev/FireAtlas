@@ -5,6 +5,8 @@ mod kml;
 mod local_map;
 mod markers;
 mod settings;
+mod updater;
+mod water_edit;
 
 use db::Db;
 use parking_lot::Mutex;
@@ -420,6 +422,68 @@ fn get_water_point(
 }
 
 #[tauri::command]
+fn delete_water_point(
+    state: tauri::State<'_, Arc<AppState>>,
+    id: i64,
+) -> Result<(), String> {
+    let point = state
+        .db
+        .lock()
+        .get_water(id)?
+        .ok_or_else(|| "Точка ИППВ не найдена".to_string())?;
+    let path = point
+        .source_path
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .ok_or_else(|| "У точки нет пути к файлу карты".to_string())?;
+    water_edit::delete_placemark_in_source(
+        PathBuf::from(path).as_path(),
+        &point.name,
+        point.lat,
+        point.lon,
+    )
+    .map_err(|e| format!("{e}\nФайл: {path}"))?;
+    state.db.lock().delete_water(id)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn move_water_point(
+    state: tauri::State<'_, Arc<AppState>>,
+    id: i64,
+    lat: f64,
+    lon: f64,
+) -> Result<WaterPointDto, String> {
+    if !lat.is_finite() || !lon.is_finite() {
+        return Err("Некорректные координаты".into());
+    }
+    let point = state
+        .db
+        .lock()
+        .get_water(id)?
+        .ok_or_else(|| "Точка ИППВ не найдена".to_string())?;
+    let path = point
+        .source_path
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .ok_or_else(|| "У точки нет пути к файлу карты".to_string())?;
+    water_edit::move_placemark_in_source(
+        PathBuf::from(path).as_path(),
+        &point.name,
+        point.lat,
+        point.lon,
+        lat,
+        lon,
+    )?;
+    state.db.lock().update_water_coords(id, lat, lon)?;
+    state
+        .db
+        .lock()
+        .get_water(id)?
+        .ok_or_else(|| "Точка ИППВ не найдена после переноса".into())
+}
+
+#[tauri::command]
 fn get_card(state: tauri::State<'_, Arc<AppState>>, id: i64) -> Result<Option<CardDto>, String> {
     state.db.lock().get_card(id)
 }
@@ -480,13 +544,66 @@ fn get_favorites(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<SearchHit
     state.db.lock().get_favorites()
 }
 
-/// Отдаёт метки из БД и, при необходимости, обновляет KML-файл рядом с базой.
-/// Блокировки берём по очереди: parking_lot::Mutex не реентрантный.
+/// Метки в БД + запись в рабочий KML/KMZ карты.
 fn markers_state(
     state: &AppState,
     preferred_source: Option<&str>,
     force_write: bool,
 ) -> Result<MarkersState, String> {
+    let data_path = state.settings.lock().data_path.clone();
+    let sidecar = markers::markers_file_path(&data_path);
+
+    // Импорт только при чтении (не при сохранении/удалении!) —
+    // иначе пустая БД после удаления снова наполняется из ещё не обновлённого KMZ.
+    if !force_write {
+        let db = state.db.lock();
+        let existing = db.list_user_markers()?;
+        if existing.is_empty() {
+            let mut candidates: Vec<PathBuf> = Vec::new();
+            // Сначала рабочий KMZ (источник истины), sidecar — запасной.
+            if let Ok(Some(active)) = db.get_meta("active_marker_source") {
+                let p = PathBuf::from(&active);
+                if p.exists() {
+                    candidates.push(p);
+                }
+            }
+            if let Ok(Some(src)) = db.latest_source_path() {
+                let p = PathBuf::from(&src);
+                if p.exists() && !candidates.iter().any(|c| c == &p) {
+                    candidates.push(p);
+                }
+            }
+            if let Some(ref p) = sidecar {
+                if p.exists() && !candidates.iter().any(|c| c == p) {
+                    candidates.push(p.clone());
+                }
+            }
+            for path in candidates {
+                match markers::has_managed_block(&path) {
+                    Ok(true) => {
+                        if let Ok(imported) = markers::read_managed_markers(&path) {
+                            for m in imported {
+                                if !db.has_similar_user_marker(&m.name, m.lat, m.lon)? {
+                                    let _ = db.add_user_marker(
+                                        &m.name,
+                                        m.comment.as_deref(),
+                                        m.lat,
+                                        m.lon,
+                                        &m.created_at,
+                                    );
+                                }
+                            }
+                        }
+                        // Только один источник истины (пустой блок = меток нет).
+                        break;
+                    }
+                    Ok(false) => continue,
+                    Err(_) => continue,
+                }
+            }
+        }
+    }
+
     let db = state.db.lock();
     let list = db.list_user_markers()?;
     let preferred = preferred_source.map(str::trim).filter(|p| !p.is_empty());
@@ -508,25 +625,48 @@ fn markers_state(
     drop(db);
 
     let Some(path_string) = selected_source else {
-        let has_markers = !list.is_empty();
+        let mut file_error = None;
+        let file = if let Some(ref p) = sidecar {
+            if force_write {
+                if let Err(e) = markers::write_markers_file(p, &list) {
+                    file_error = Some(e);
+                }
+            }
+            Some(crate::MarkerFileInfo {
+                path: p.display().to_string(),
+                count: list.len(),
+            })
+        } else {
+            if force_write {
+                file_error = Some(
+                    "Нет загруженного рабочего KML/KMZ. Добавьте карту в настройках или укажите папку базы."
+                        .into(),
+                );
+            }
+            None
+        };
         return Ok(MarkersState {
             markers: list,
-            file: None,
-            file_error: if force_write && has_markers {
-                Some("Нет загруженного рабочего KML/KMZ для записи меток".into())
-            } else {
-                None
-            },
+            file,
+            file_error,
         });
     };
-    let path = PathBuf::from(path_string);
 
-    // При обычном чтении файл не перезаписываем — только восстанавливаем, если он исчез.
-    // Метка уже в базе, поэтому недоступный сетевой диск не должен ломать сохранение.
+    let path = PathBuf::from(&path_string);
     let mut file_error = None;
+
     if force_write {
+        // Sidecar + рабочий KMZ синхронно (быстрый raw_copy), чтобы удаление не откатывалось.
+        if let Some(ref side) = sidecar {
+            if let Err(e) = markers::write_markers_file(side, &list) {
+                file_error = Some(e);
+            }
+        }
         if let Err(e) = markers::write_markers_to_source(&path, &list) {
-            file_error = Some(e);
+            file_error = Some(match file_error {
+                Some(prev) => format!("{prev}; {e}"),
+                None => e,
+            });
         }
     }
 
@@ -580,12 +720,42 @@ fn add_marker(
         .filter(|c| !c.is_empty());
     let created_at = chrono::Local::now().to_rfc3339();
 
+    // Защита от двойного клика: не создавать дубликат за последние секунды.
+    {
+        let db = state.db.lock();
+        if db.has_similar_user_marker(name, lat, lon)? {
+            return markers_state(&state, source_path.as_deref(), false);
+        }
+        db.add_user_marker(name, comment.as_deref(), lat, lon, &created_at)?;
+    }
+
+    markers_state(&state, source_path.as_deref(), true)
+}
+
+#[tauri::command]
+fn update_marker(
+    state: tauri::State<'_, Arc<AppState>>,
+    id: i64,
+    name: String,
+    comment: Option<String>,
+    lat: f64,
+    lon: f64,
+) -> Result<MarkersState, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Укажите название метки".into());
+    }
+    if !lat.is_finite() || !lon.is_finite() {
+        return Err("Некорректные координаты метки".into());
+    }
+    let comment = comment
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
     state
         .db
         .lock()
-        .add_user_marker(name, comment.as_deref(), lat, lon, &created_at)?;
-
-    markers_state(&state, source_path.as_deref(), true)
+        .update_user_marker(id, name, comment.as_deref(), lat, lon)?;
+    markers_state(&state, None, true)
 }
 
 #[tauri::command]
@@ -877,6 +1047,25 @@ fn pick_map_package_folder(
     Ok(info)
 }
 
+#[tauri::command]
+fn get_app_version() -> String {
+    updater::current_version()
+}
+
+#[tauri::command]
+fn check_for_updates() -> Result<updater::UpdateCheckResult, String> {
+    updater::check_for_updates()
+}
+
+#[tauri::command]
+fn download_and_apply_update(
+    app: tauri::AppHandle,
+    url: String,
+    sha256: String,
+) -> Result<(), String> {
+    updater::download_and_apply_update(app, url, sha256)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -913,6 +1102,8 @@ pub fn run() {
             search,
             get_water_in_bounds,
             get_water_point,
+            delete_water_point,
+            move_water_point,
             get_card,
             list_cards,
             nearby,
@@ -922,6 +1113,7 @@ pub fn run() {
             get_favorites,
             list_markers,
             add_marker,
+            update_marker,
             delete_marker,
             open_path,
             open_folder,
@@ -939,7 +1131,11 @@ pub fn run() {
             infocard::infocard_login,
             infocard::infocard_logout,
             infocard::infocard_search_files,
-            infocard::infocard_open_pdf
+            infocard::infocard_open_pdf,
+            infocard::infocard_list_markers,
+            get_app_version,
+            check_for_updates,
+            download_and_apply_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

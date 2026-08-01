@@ -31,10 +31,24 @@ pub struct AppSettings {
     pub infocard_enabled: bool,
     #[serde(default)]
     pub infocard_login: String,
+    /// local | server | both — источник информационных карточек
+    #[serde(default = "default_cards_mode")]
+    pub cards_mode: String,
+    /// local | server — источник пользовательских меток на карте
+    #[serde(default = "default_markers_mode")]
+    pub markers_mode: String,
 }
 
 fn default_infocard_api() -> String {
     "https://infocardmchs.ru/api".into()
+}
+
+fn default_cards_mode() -> String {
+    "local".into()
+}
+
+fn default_markers_mode() -> String {
+    "local".into()
 }
 
 fn default_provider() -> String {
@@ -69,6 +83,8 @@ impl Default for AppSettings {
             infocard_api_base: default_infocard_api(),
             infocard_enabled: false,
             infocard_login: String::new(),
+            cards_mode: default_cards_mode(),
+            markers_mode: default_markers_mode(),
         }
     }
 }

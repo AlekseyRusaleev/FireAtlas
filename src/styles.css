@@ -341,9 +341,29 @@ button {
   border-color: var(--accent);
 }
 
+.btn.danger {
+  background: #5c2b2b;
+  border-color: #7a3a3a;
+  color: #ffd7d7;
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.water-edit-bar {
+  margin: 0.35rem 0 0.5rem;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated, var(--bg-panel));
+}
+
+.water-edit-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-bottom: 0.15rem;
 }
 
 .muted {
@@ -558,6 +578,47 @@ button {
   border: 1px solid var(--border);
   color: var(--text-muted);
   font-size: 0.9rem;
+}
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.65rem 1rem;
+  background: #243447;
+  border-bottom: 1px solid var(--border);
+}
+
+.update-banner-text {
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.update-banner-text span {
+  color: var(--text-muted);
+}
+
+.update-banner-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.about-update {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+.about-update-msg {
+  margin: 0.75rem 0 0;
+}
+
+.error-text {
+  color: #ff8f8f;
+  margin: 0.5rem 0 0;
 }
 
 .empty {

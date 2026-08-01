@@ -1,0 +1,9 @@
+{
+  "version": "0.1.1",
+  "notes": "Кратко, что нового в этой версии.",
+  "publishedAt": "2026-07-31",
+  "portable": {
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.1-portable.zip",
+    "sha256": "REPLACE_WITH_SHA256_OF_ZIP"
+  }
+}

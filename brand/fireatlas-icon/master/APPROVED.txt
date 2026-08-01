@@ -1,0 +1,3 @@
+Approved: gallery-02b shield + route + fire truck
+Use for: PC, Android/RuStore, web, VK
+Favicon small sizes use favicon-simple twin.

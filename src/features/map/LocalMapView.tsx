@@ -142,11 +142,15 @@ function BoundsWatcher({
 function MarkersLayer({
   points,
   focusId,
+  pickMode,
   onPointClick,
+  onPick,
 }: {
   points: WaterPoint[];
   focusId: number | null;
+  pickMode: boolean;
   onPointClick: (p: WaterPoint) => void;
+  onPick?: (lat: number, lon: number) => void;
 }) {
   const map = useMap();
   useEffect(() => {
@@ -155,14 +159,21 @@ function MarkersLayer({
       const m = L.marker([p.lat, p.lon], {
         icon: makeIcon(p.water_type, focusId === p.id),
       });
-      m.on("click", () => onPointClick(p));
+      m.on("click", (e) => {
+        L.DomEvent.stopPropagation(e);
+        if (pickMode) {
+          onPick?.(p.lat, p.lon);
+        } else {
+          onPointClick(p);
+        }
+      });
       m.bindTooltip(p.name);
       m.addTo(group);
     }
     return () => {
       map.removeLayer(group);
     };
-  }, [map, points, focusId, onPointClick]);
+  }, [map, points, focusId, pickMode, onPointClick, onPick]);
   return null;
 }
 
@@ -191,6 +202,62 @@ function SearchPinLayer({ searchPin }: { searchPin: SearchPin | null }) {
   return null;
 }
 
+const USER_MARKER_ICON = L.divIcon({
+  className: "",
+  html: `<div style="width:16px;height:16px;border-radius:50%;background:#9b59b6;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5)"></div>`,
+  iconSize: [16, 16],
+  iconAnchor: [8, 8],
+});
+
+function MapClickCatcher({
+  enabled,
+  onPick,
+}: {
+  enabled: boolean;
+  onPick: (lat: number, lon: number) => void;
+}) {
+  const map = useMapEvents({
+    click: (e) => {
+      if (enabled) onPick(e.latlng.lat, e.latlng.lng);
+    },
+  });
+  useEffect(() => {
+    const el = map.getContainer();
+    const prev = el.style.cursor;
+    el.style.cursor = enabled ? "crosshair" : "";
+    return () => {
+      el.style.cursor = prev;
+    };
+  }, [map, enabled]);
+  return null;
+}
+
+function UserMarkersLayer({
+  markers,
+}: {
+  markers: Array<{ id: number; name: string; comment: string | null; lat: number; lon: number }>;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    const group = L.layerGroup().addTo(map);
+    for (const m of markers) {
+      const marker = L.marker([m.lat, m.lon], {
+        icon: USER_MARKER_ICON,
+        zIndexOffset: 500,
+      });
+      const body = m.comment
+        ? `<strong>${m.name}</strong><br/>${m.comment}`
+        : `<strong>${m.name}</strong>`;
+      marker.bindPopup(body);
+      marker.addTo(group);
+    }
+    return () => {
+      map.removeLayer(group);
+    };
+  }, [map, markers]);
+  return null;
+}
+
 interface Props {
   packagePath: string;
   nativeMinZoom?: number;
@@ -200,6 +267,9 @@ interface Props {
   points: WaterPoint[];
   focusId: number | null;
   searchPin?: SearchPin | null;
+  markers?: Array<{ id: number; name: string; comment: string | null; lat: number; lon: number }>;
+  pickMode?: boolean;
+  onPick?: (lat: number, lon: number) => void;
   onBoundsChange: (b: { south: number; west: number; north: number; east: number }) => void;
   onPointClick: (p: WaterPoint) => void;
 }
@@ -213,6 +283,9 @@ export function LocalMapView({
   points,
   focusId,
   searchPin = null,
+  markers = [],
+  pickMode = false,
+  onPick,
   onBoundsChange,
   onPointClick,
 }: Props) {
@@ -247,7 +320,18 @@ export function LocalMapView({
       />
       <FlyTo center={center} zoom={Math.min(Math.max(zoom, viewMin), viewMax)} />
       <BoundsWatcher onBounds={onBoundsChange} />
-      <MarkersLayer points={points} focusId={focusId} onPointClick={onPointClick} />
+      <MapClickCatcher
+        enabled={pickMode}
+        onPick={(lat, lon) => onPick?.(lat, lon)}
+      />
+      <MarkersLayer
+        points={points}
+        focusId={focusId}
+        pickMode={pickMode}
+        onPointClick={onPointClick}
+        onPick={onPick}
+      />
+      <UserMarkersLayer markers={markers} />
       <SearchPinLayer searchPin={searchPin} />
       <HouseNumbersLayer />
     </MapContainer>

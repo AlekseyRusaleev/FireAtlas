@@ -842,6 +842,37 @@ impl Db {
             .map_err(|e| e.to_string())
     }
 
+    pub fn delete_water(&self, id: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM water_points_fts WHERE rowid=?1",
+                params![id],
+            )
+            .map_err(|e| e.to_string())?;
+        let n = self
+            .conn
+            .execute("DELETE FROM water_points WHERE id=?1", params![id])
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("Точка ИППВ не найдена".into());
+        }
+        Ok(())
+    }
+
+    pub fn update_water_coords(&self, id: i64, lat: f64, lon: f64) -> Result<(), String> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE water_points SET lat=?1, lon=?2 WHERE id=?3",
+                params![lat, lon, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("Точка ИППВ не найдена".into());
+        }
+        Ok(())
+    }
+
     pub fn get_card(&self, id: i64) -> Result<Option<CardDto>, String> {
         let card = self
             .conn
@@ -1195,6 +1226,43 @@ impl Db {
             .execute("DELETE FROM user_markers WHERE id=?1", params![id])
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn update_user_marker(
+        &self,
+        id: i64,
+        name: &str,
+        comment: Option<&str>,
+        lat: f64,
+        lon: f64,
+    ) -> Result<(), String> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE user_markers SET name=?1, comment=?2, lat=?3, lon=?4 WHERE id=?5",
+                params![name, comment, lat, lon, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("Метка не найдена".into());
+        }
+        Ok(())
+    }
+
+    /// Есть ли уже метка с почти теми же координатами и именем.
+    pub fn has_similar_user_marker(&self, name: &str, lat: f64, lon: f64) -> Result<bool, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT 1 FROM user_markers
+                 WHERE name=?1 AND abs(lat-?2)<0.00001 AND abs(lon-?3)<0.00001
+                 LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let found = stmt
+            .exists(params![name, lat, lon])
+            .map_err(|e| e.to_string())?;
+        Ok(found)
     }
 }
 

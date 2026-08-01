@@ -43,6 +43,60 @@ const SEARCH_RADIUS_KM = 50;
 /** Сколько точек максимум рисовать на карте за раз — больше сильно подвисает UI. */
 const MAP_POINTS_LIMIT = 800;
 
+function guessWaterType(name: string, comment?: string | null): WaterType {
+  const t = `${name} ${comment || ""}`.toLowerCase();
+  if (t.includes("гидрант") || t.includes("пг") || t.includes("hydrant")) return "hydrant";
+  if (t.includes("пруд") || t.includes("водоём") || t.includes("водоем") || t.includes("озеро"))
+    return "pond";
+  if (t.includes("башня") || t.includes("tower")) return "tower";
+  if (t.includes("пирс") || t.includes("причал") || t.includes("pier")) return "pier";
+  return "other";
+}
+
+function markersToWaterPoints(markers: UserMarker[]): WaterPoint[] {
+  return markers
+    .filter((m) => Number.isFinite(m.lat) && Number.isFinite(m.lon))
+    .map((m) => ({
+      id: m.id,
+      name: m.name,
+      water_type: guessWaterType(m.name, m.comment),
+      lat: m.lat,
+      lon: m.lon,
+      address: null,
+      description: m.comment,
+      source_path: null,
+    }));
+}
+
+function filterPointsInBounds(
+  pts: WaterPoint[],
+  b: { south: number; west: number; north: number; east: number }
+): WaterPoint[] {
+  const inB = pts.filter(
+    (p) => p.lat >= b.south && p.lat <= b.north && p.lon >= b.west && p.lon <= b.east
+  );
+  return inB.length > MAP_POINTS_LIMIT ? inB.slice(0, MAP_POINTS_LIMIT) : inB;
+}
+
+function nearbyFromPoints(
+  pts: WaterPoint[],
+  lat: number,
+  lon: number,
+  limit: number
+): NearbyPoint[] {
+  return pts
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      water_type: p.water_type,
+      lat: p.lat,
+      lon: p.lon,
+      distance_m: distanceKm(lat, lon, p.lat, p.lon) * 1000,
+    }))
+    .sort((a, b) => a.distance_m - b.distance_m)
+    .slice(0, limit);
+}
+
 type SideMode = "search" | "history" | "favorites" | "markers";
 
 function addressFromDescription(raw?: string | null): string | null {
@@ -202,37 +256,33 @@ function MapClickCatcher({
 }
 
 function BoundsLoader({
-  types,
-  onPoints,
+  onBounds,
 }: {
-  types: WaterType[];
-  onPoints: (points: WaterPoint[]) => void;
+  onBounds: (b: { south: number; west: number; north: number; east: number }) => void;
 }) {
   const map = useMapEvents({
     moveend: () => {
-      void load();
+      notify();
     },
     zoomend: () => {
-      void load();
+      notify();
     },
   });
 
-  async function load() {
+  function notify() {
     const b = map.getBounds();
-    const points = await api.getWaterInBounds(
-      b.getSouth(),
-      b.getWest(),
-      b.getNorth(),
-      b.getEast(),
-      types
-    );
-    onPoints(points);
+    onBounds({
+      south: b.getSouth(),
+      west: b.getWest(),
+      north: b.getNorth(),
+      east: b.getEast(),
+    });
   }
 
   useEffect(() => {
-    void load();
+    notify();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [types.join(",")]);
+  }, []);
 
   return null;
 }
@@ -274,11 +324,20 @@ interface Props {
 }
 
 export function MapPage({ settings, onOpenCard }: Props) {
+  const serverWaterMode = (settings.markers_mode || "local") === "server";
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [points, setPoints] = useState<WaterPoint[]>([]);
+  /** Полный список серверных водоисточников (для поиска и фильтра по viewport). */
+  const [serverPointsAll, setServerPointsAll] = useState<WaterPoint[]>([]);
+  const lastBoundsRef = useRef<{
+    south: number;
+    west: number;
+    north: number;
+    east: number;
+  } | null>(null);
   const [selected, setSelected] = useState<SearchHit | null>(null);
   const [water, setWater] = useState<WaterPoint | null>(null);
   const [nearby, setNearby] = useState<NearbyPoint[]>([]);
@@ -301,10 +360,16 @@ export function MapPage({ settings, onOpenCard }: Props) {
   const [markers, setMarkers] = useState<UserMarker[]>([]);
   const [markerFile, setMarkerFile] = useState<MarkerFileInfo | null>(null);
   const [pickMode, setPickMode] = useState(false);
+  /** Перенос ИППВ: клик по карте задаёт новые координаты. */
+  const [moveWaterId, setMoveWaterId] = useState<number | null>(null);
+  /** При правке метки FireAtlas — выбрать новое место кликом. */
+  const [pickForEditMarker, setPickForEditMarker] = useState(false);
   const [draft, setDraft] = useState<{ lat: number; lon: number } | null>(null);
   const [draftName, setDraftName] = useState("");
   const [draftComment, setDraftComment] = useState("");
   const [markerError, setMarkerError] = useState<string | null>(null);
+  const [markerBusy, setMarkerBusy] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const draftNameRef = useRef<HTMLInputElement>(null);
 
   const useLocalMap = Boolean(settings.local_map_path);
@@ -331,6 +396,34 @@ export function MapPage({ settings, onOpenCard }: Props) {
     setMarkerFile(state.file);
     setMarkerError(state.file_error);
   }, []);
+
+  const applyServerWater = useCallback((state: MarkersState) => {
+    const pts = markersToWaterPoints(state.markers);
+    setServerPointsAll(pts);
+    setMarkers([]);
+    setMarkerFile(null);
+    setMarkerError(state.file_error);
+    const b = lastBoundsRef.current;
+    if (b) {
+      setPoints(filterPointsInBounds(pts, b));
+    } else {
+      setPoints(pts.length > MAP_POINTS_LIMIT ? pts.slice(0, MAP_POINTS_LIMIT) : pts);
+    }
+  }, []);
+
+  async function refreshServerWater() {
+    setMarkerBusy(true);
+    setMarkerError(null);
+    try {
+      applyServerWater(await api.infocardListMarkers());
+    } catch (e) {
+      setServerPointsAll([]);
+      setPoints([]);
+      setMarkerError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMarkerBusy(false);
+    }
+  }
 
   useEffect(() => {
     void refreshLists();
@@ -359,12 +452,34 @@ export function MapPage({ settings, onOpenCard }: Props) {
   useEffect(() => {
     void (async () => {
       try {
-        applyMarkers(await api.listMarkers());
+        if (serverWaterMode) {
+          applyServerWater(await api.infocardListMarkers());
+        } else {
+          setServerPointsAll([]);
+          applyMarkers(await api.listMarkers());
+          const b = lastBoundsRef.current;
+          if (b) {
+            const pts = await api.getWaterInBounds(
+              b.south,
+              b.west,
+              b.north,
+              b.east,
+              ALL_TYPES
+            );
+            setPoints(pts.length > MAP_POINTS_LIMIT ? pts.slice(0, MAP_POINTS_LIMIT) : pts);
+          } else {
+            setPoints([]);
+          }
+        }
       } catch (e) {
+        if (serverWaterMode) {
+          setServerPointsAll([]);
+          setPoints([]);
+        }
         setMarkerError(e instanceof Error ? e.message : String(e));
       }
     })();
-  }, [applyMarkers, settings.data_path]);
+  }, [applyMarkers, applyServerWater, settings.data_path, serverWaterMode]);
 
   useEffect(() => {
     setCenter([settings.default_lat, settings.default_lon]);
@@ -375,26 +490,91 @@ export function MapPage({ settings, onOpenCard }: Props) {
       void (async () => {
         if (!query.trim()) {
           setHits([]);
-          // Сброс строки поиска снимает подсветку найденного адреса.
           setSearchPin(null);
           setGeoError(null);
           return;
         }
-        const res = await api.search(query, ALL_TYPES, 80);
-        // Отсекаем объекты далеко от города по умолчанию (другие регионы в индексе).
-        const local = res.filter((hit) => {
-          if (hit.lat == null || hit.lon == null) return true;
-          return (
-            distanceKm(settings.default_lat, settings.default_lon, hit.lat, hit.lon) <=
-            SEARCH_RADIUS_KM
-          );
-        });
-        setHits(local.slice(0, 40));
+        const q = query.trim().toLowerCase();
+        const cardsMode = settings.cards_mode || "local";
+        const wantLocalCards = cardsMode === "local" || cardsMode === "both";
+        const wantServerCards = cardsMode === "server" || cardsMode === "both";
+
+        let waterHits: SearchHit[] = [];
+        if (serverWaterMode) {
+          waterHits = serverPointsAll
+            .filter((p) => {
+              const hay = `${p.name} ${p.description || ""}`.toLowerCase();
+              return hay.includes(q);
+            })
+            .slice(0, 40)
+            .map((p) => ({
+              id: p.id,
+              kind: "water" as const,
+              title: p.name,
+              subtitle: p.description || `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`,
+              water_type: p.water_type,
+              address: p.address,
+              lat: p.lat,
+              lon: p.lon,
+            }));
+        } else {
+          const res = await api.search(query, ALL_TYPES, 80);
+          waterHits = res.filter((hit) => {
+            if (hit.kind !== "water") return false;
+            if (hit.lat == null || hit.lon == null) return true;
+            return (
+              distanceKm(settings.default_lat, settings.default_lon, hit.lat, hit.lon) <=
+              SEARCH_RADIUS_KM
+            );
+          });
+        }
+
+        let cardHits: SearchHit[] = [];
+        if (wantLocalCards) {
+          const res = await api.search(query, ALL_TYPES, 80);
+          cardHits = res.filter((hit) => {
+            if (hit.kind !== "card") return false;
+            if (hit.lat == null || hit.lon == null) return true;
+            return (
+              distanceKm(settings.default_lat, settings.default_lon, hit.lat, hit.lon) <=
+              SEARCH_RADIUS_KM
+            );
+          });
+        }
+
+        let infocardHits: SearchHit[] = [];
+        if (wantServerCards && q.length >= 2) {
+          try {
+            const files = await api.infocardSearchFiles(query.trim(), 40);
+            infocardHits = files.map((f, i) => ({
+              id: -(i + 1),
+              kind: "infocard" as const,
+              title: f.name || f.id,
+              subtitle:
+                (f.status || "").toLowerCase() === "ready"
+                  ? "Infocard · PDF готов"
+                  : `Infocard · ${f.status || "файл"}`,
+              infocard_id: f.id,
+              infocard_status: f.status,
+            }));
+          } catch {
+            /* нет сессии */
+          }
+        }
+
+        setHits([...cardHits, ...infocardHits, ...waterHits].slice(0, 50));
         setActiveIndex(0);
       })();
     }, 180);
     return () => window.clearTimeout(t);
-  }, [query, settings.default_lat, settings.default_lon]);
+  }, [
+    query,
+    settings.default_lat,
+    settings.default_lon,
+    settings.cards_mode,
+    serverWaterMode,
+    serverPointsAll,
+  ]);
 
   useEffect(() => {
     setActiveIndex(0);
@@ -402,11 +582,15 @@ export function MapPage({ settings, onOpenCard }: Props) {
 
   const loadBounds = useCallback(
     async (b: { south: number; west: number; north: number; east: number }) => {
+      lastBoundsRef.current = b;
+      if (serverWaterMode) {
+        setPoints(filterPointsInBounds(serverPointsAll, b));
+        return;
+      }
       const pts = await api.getWaterInBounds(b.south, b.west, b.north, b.east, ALL_TYPES);
-      // Лимит на клиенте: даже если БД вернула тысячи точек, на карту кладём урезанный набор.
       setPoints(pts.length > MAP_POINTS_LIMIT ? pts.slice(0, MAP_POINTS_LIMIT) : pts);
     },
-    []
+    [serverWaterMode, serverPointsAll]
   );
 
   const boundsTimer = useRef<number | null>(null);
@@ -428,20 +612,57 @@ export function MapPage({ settings, onOpenCard }: Props) {
   async function selectHit(hit: SearchHit, fallbackQuery?: string) {
     setSelected(hit);
     setGeoError(null);
+    setMoveWaterId(null);
+
+    if (hit.kind === "infocard") {
+      setWater(null);
+      setFocusId(null);
+      setNearby([]);
+      return;
+    }
+
     // Сразу двигаем карту по координатам из результата (Enter / клик).
     if (hit.lat != null && hit.lon != null) {
       moveTo(hit.lat, hit.lon, hit.kind === "card" ? ADDRESS_ZOOM : 15);
       if (hit.kind === "water") setFocusId(hit.id);
     }
-    await api.addHistory(hit.kind, hit.id, hit.title);
+    try {
+      await api.addHistory(hit.kind, hit.id, hit.title);
+    } catch {
+      /* ignore */
+    }
     void refreshLists();
     if (hit.kind === "water") {
-      const wp = await api.getWaterPoint(hit.id);
+      let wp: WaterPoint | null = null;
+      if (serverWaterMode) {
+        wp =
+          serverPointsAll.find((p) => p.id === hit.id) ||
+          points.find((p) => p.id === hit.id) ||
+          null;
+        if (!wp && hit.lat != null && hit.lon != null) {
+          wp = {
+            id: hit.id,
+            name: hit.title,
+            water_type: hit.water_type || "other",
+            lat: hit.lat,
+            lon: hit.lon,
+            address: hit.address || null,
+            description: hit.subtitle || null,
+            source_path: null,
+          };
+        }
+      } else {
+        wp = await api.getWaterPoint(hit.id);
+      }
       setWater(wp);
       if (wp) {
         moveTo(wp.lat, wp.lon);
         setFocusId(wp.id);
-        setNearby(await api.nearby(wp.lat, wp.lon, 8, ALL_TYPES));
+        if (serverWaterMode) {
+          setNearby(nearbyFromPoints(serverPointsAll, wp.lat, wp.lon, 8));
+        } else {
+          setNearby(await api.nearby(wp.lat, wp.lon, 8, ALL_TYPES));
+        }
       }
       return;
     }
@@ -644,8 +865,17 @@ export function MapPage({ settings, onOpenCard }: Props) {
   }
 
   function startDraft(lat: number, lon: number, name = "") {
+    if (serverWaterMode) {
+      setMarkerError(
+        "Серверные водоисточники правятся в веб-кабинете Infocard. В приложении — только просмотр."
+      );
+      return;
+    }
     setPickMode(false);
+    setPickForEditMarker(false);
+    setMoveWaterId(null);
     setMarkerError(null);
+    setEditingId(null);
     setDraft({ lat, lon });
     setDraftName(name);
     setDraftComment("");
@@ -653,37 +883,180 @@ export function MapPage({ settings, onOpenCard }: Props) {
     window.setTimeout(() => draftNameRef.current?.focus(), 0);
   }
 
+  async function onMapPick(lat: number, lon: number) {
+    if (moveWaterId != null) {
+      const id = moveWaterId;
+      setMoveWaterId(null);
+      setPickMode(false);
+      setMarkerBusy(true);
+      setMarkerError(null);
+      try {
+        const updated = await api.moveWaterPoint(id, lat, lon);
+        setWater(updated);
+        setPoints((prev) => prev.map((p) => (p.id === id ? { ...p, lat, lon } : p)));
+        setSelected((prev) =>
+          prev && prev.kind === "water" && prev.id === id
+            ? { ...prev, lat, lon, subtitle: `${lat.toFixed(5)}, ${lon.toFixed(5)}` }
+            : prev
+        );
+        moveTo(lat, lon, 16);
+        setFocusId(id);
+        setNearby(await api.nearby(lat, lon, 8, ALL_TYPES));
+      } catch (e) {
+        setGeoError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setMarkerBusy(false);
+      }
+      return;
+    }
+    if (pickForEditMarker && draft) {
+      setDraft({ lat, lon });
+      setPickForEditMarker(false);
+      setPickMode(false);
+      moveTo(lat, lon, 16);
+      return;
+    }
+    startDraft(lat, lon);
+  }
+
+  async function removeWaterPoint() {
+    if (!water || markerBusy || serverWaterMode) return;
+    if (
+      !window.confirm(
+        `Удалить «${water.name}» из файла карты?\n${water.source_path || ""}\nЭто изменит KMZ/KML на диске.`
+      )
+    ) {
+      return;
+    }
+    setMarkerBusy(true);
+    setMarkerError(null);
+    const id = water.id;
+    try {
+      await api.deleteWaterPoint(id);
+      setPoints((prev) => prev.filter((p) => p.id !== id));
+      setWater(null);
+      setSelected(null);
+      setFocusId(null);
+      setNearby([]);
+    } catch (e) {
+      setGeoError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMarkerBusy(false);
+    }
+  }
+
+  function beginMoveWater() {
+    if (!water || serverWaterMode) return;
+    setMoveWaterId(water.id);
+    setPickMode(true);
+    setPickForEditMarker(false);
+    setSideMode("search");
+  }
+
+  async function openInfocardHit(hit: SearchHit) {
+    const fileId = hit.infocard_id;
+    if (!fileId) {
+      setGeoError("Нет идентификатора файла Infocard");
+      return;
+    }
+    if ((hit.infocard_status || "").toLowerCase() !== "ready") {
+      setGeoError(
+        "PDF ещё не готов (Visio/фото/Word конвертируются на сервере). Подождите и обновите поиск."
+      );
+      return;
+    }
+    setMarkerBusy(true);
+    setGeoError(null);
+    try {
+      await api.infocardOpenPdf(fileId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setGeoError(
+        msg.includes("404") || msg.toLowerCase().includes("not ready")
+          ? "PDF ещё не готов или файл не найден."
+          : msg
+      );
+    } finally {
+      setMarkerBusy(false);
+    }
+  }
+
   async function saveDraft() {
-    if (!draft) return;
+    if (!draft || markerBusy) return;
+    if (serverWaterMode) {
+      setMarkerError(
+        "Серверные водоисточники правятся в веб-кабинете Infocard. В приложении — только просмотр."
+      );
+      return;
+    }
     if (!draftName.trim()) {
       setMarkerError("Укажите название метки");
       draftNameRef.current?.focus();
       return;
     }
+    const name = draftName.trim();
+    const comment = draftComment.trim() || null;
+    const { lat, lon } = draft;
+    const editId = editingId;
+
+    // Сразу закрываем форму — защита от повторных нажатий.
+    setMarkerBusy(true);
+    setMarkerError(null);
+    setDraft(null);
+    setDraftName("");
+    setDraftComment("");
+    setEditingId(null);
+
     try {
-      applyMarkers(
-        await api.addMarker(
-          draftName,
-          draftComment.trim() || null,
-          draft.lat,
-          draft.lon,
-          water?.source_path
-        )
-      );
-      setDraft(null);
-      setDraftName("");
-      setDraftComment("");
+      if (editId != null) {
+        applyMarkers(await api.updateMarker(editId, name, comment, lat, lon));
+      } else {
+        // Пишем в тот же KMZ/KML, что на карте (файл гидрантов / активный источник).
+        const sourcePath = water?.source_path ?? points[0]?.source_path ?? null;
+        applyMarkers(await api.addMarker(name, comment, lat, lon, sourcePath));
+      }
     } catch (e) {
       setMarkerError(e instanceof Error ? e.message : String(e));
+      // Вернуть форму при ошибке
+      setDraft({ lat, lon });
+      setDraftName(name);
+      setDraftComment(comment || "");
+      setEditingId(editId);
+    } finally {
+      setMarkerBusy(false);
     }
   }
 
   async function removeMarker(id: number) {
+    if (markerBusy) return;
+    setMarkerBusy(true);
+    setMarkerError(null);
+    // Оптимистично убираем из списка
+    setMarkers((prev) => prev.filter((m) => m.id !== id));
     try {
       applyMarkers(await api.deleteMarker(id));
     } catch (e) {
       setMarkerError(e instanceof Error ? e.message : String(e));
+      try {
+        applyMarkers(await api.listMarkers());
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      setMarkerBusy(false);
     }
+  }
+
+  function beginEdit(m: (typeof markers)[number]) {
+    setEditingId(m.id);
+    setDraft({ lat: m.lat, lon: m.lon });
+    setDraftName(m.name);
+    setDraftComment(m.comment || "");
+    setSideMode("markers");
+    setPickMode(false);
+    setPickForEditMarker(false);
+    setMoveWaterId(null);
+    window.setTimeout(() => draftNameRef.current?.focus(), 0);
   }
 
   function selectNearby(n: NearbyPoint) {
@@ -794,15 +1167,112 @@ export function MapPage({ settings, onOpenCard }: Props) {
             className={`btn ${sideMode === "markers" ? "primary" : ""}`}
             onClick={() => setSideMode("markers")}
           >
-            Метки ({markers.length})
+            {serverWaterMode
+              ? `С сервера (${serverPointsAll.length})`
+              : `Метки (${markers.length})`}
           </button>
         </div>
 
+        {serverWaterMode && (
+          <div className="actions" style={{ marginTop: 4 }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={markerBusy}
+              onClick={() => void refreshServerWater()}
+            >
+              {markerBusy ? "Обновление…" : "Обновить с сервера"}
+            </button>
+          </div>
+        )}
+
+        {water && !serverWaterMode && (
+          <div className="water-edit-bar">
+            <div className="water-edit-title">{water.name}</div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+              ИППВ · правки пишутся в файл карты
+            </div>
+            <div className="actions">
+              <button
+                type="button"
+                className="btn danger"
+                disabled={markerBusy}
+                onClick={() => void removeWaterPoint()}
+              >
+                Удалить с карты
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={markerBusy}
+                onClick={() => beginMoveWater()}
+              >
+                {moveWaterId === water.id ? "Кликните на карте…" : "Перенести"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {water && serverWaterMode && (
+          <div className="water-edit-bar">
+            <div className="water-edit-title">{water.name}</div>
+            <div className="muted" style={{ fontSize: 12 }}>
+              Водоисточник с сервера · только просмотр
+            </div>
+          </div>
+        )}
+
         {sideMode === "markers" ? (
           <div className="results">
+            {markerError && (
+              <div className="status-banner" style={{ whiteSpace: "pre-wrap" }}>
+                {markerError}
+              </div>
+            )}
+
+            {serverWaterMode ? (
+              <>
+                <div className="empty">
+                  Водоисточники с сервера Infocard. Редактирование — в веб-кабинете. Здесь только
+                  просмотр.
+                </div>
+                {serverPointsAll.length === 0 && !markerError && (
+                  <div className="muted">Нет точек. Войдите в Infocard в настройках и нажмите «Обновить».</div>
+                )}
+                {serverPointsAll.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className="result-item"
+                    onClick={() =>
+                      void selectHit({
+                        id: p.id,
+                        kind: "water",
+                        title: p.name,
+                        subtitle: p.description || `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`,
+                        water_type: p.water_type,
+                        address: p.address,
+                        lat: p.lat,
+                        lon: p.lon,
+                      })
+                    }
+                  >
+                    <div className="title">
+                      <span className={`badge ${p.water_type}`}>{WATER_TYPE_SHORT[p.water_type]}</span>
+                      {p.name}
+                    </div>
+                    <div className="meta">
+                      {p.description ? `${p.description} · ` : ""}
+                      {p.lat.toFixed(5)}, {p.lon.toFixed(5)}
+                    </div>
+                  </button>
+                ))}
+              </>
+            ) : (
+              <>
             {draft && (
               <div className="marker-form">
-                <strong>Новая метка</strong>
+                <strong>{editingId != null ? "Изменить метку" : "Новая метка"}</strong>
                 <div className="muted">
                   {draft.lat.toFixed(6)}, {draft.lon.toFixed(6)}
                 </div>
@@ -811,6 +1281,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
                   className="search-box"
                   placeholder="Название метки"
                   value={draftName}
+                  disabled={markerBusy}
                   onChange={(e) => setDraftName(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
@@ -823,28 +1294,59 @@ export function MapPage({ settings, onOpenCard }: Props) {
                   className="search-box"
                   placeholder="Комментарий (необязательно)"
                   value={draftComment}
+                  disabled={markerBusy}
                   onChange={(e) => setDraftComment(e.target.value)}
                 />
                 <div className="actions">
-                  <button type="button" className="btn primary" onClick={() => void saveDraft()}>
-                    Сохранить
+                  <button
+                    type="button"
+                    className="btn primary"
+                    disabled={markerBusy}
+                    onClick={() => void saveDraft()}
+                  >
+                    {markerBusy ? "Сохранение…" : "Сохранить"}
                   </button>
-                  <button type="button" className="btn" onClick={() => setDraft(null)}>
+                  {editingId != null && (
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={markerBusy}
+                      onClick={() => {
+                        setPickForEditMarker(true);
+                        setPickMode(true);
+                        setMoveWaterId(null);
+                      }}
+                    >
+                      Указать место на карте
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={markerBusy}
+                    onClick={() => {
+                      setDraft(null);
+                      setEditingId(null);
+                      setPickForEditMarker(false);
+                    }}
+                  >
                     Отмена
                   </button>
                 </div>
-              </div>
-            )}
-
-            {markerError && (
-              <div className="status-banner" style={{ whiteSpace: "pre-wrap" }}>
-                {markerError}
+                {draft && (
+                  <div className="muted" style={{ fontSize: 13 }}>
+                    Координаты: {draft.lat.toFixed(6)}, {draft.lon.toFixed(6)}
+                    {pickForEditMarker ? " — щёлкните новое место на карте" : ""}
+                  </div>
+                )}
               </div>
             )}
 
             {!draft && markers.length === 0 && (
               <div className="empty">
                 Меток пока нет. Нажмите «Поставить метку» на карте и щёлкните по нужному месту.
+                Красные точки — гидранты из KMZ (их здесь не удаляют). Ваши метки FireAtlas удаляются
+                кнопкой «Удалить» — сразу из списка и из блока меток в файле карты.
               </div>
             )}
 
@@ -865,7 +1367,21 @@ export function MapPage({ settings, onOpenCard }: Props) {
                     {m.lat.toFixed(5)}, {m.lon.toFixed(5)}
                   </div>
                 </button>
-                <button type="button" className="btn" onClick={() => void removeMarker(m.id)}>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={markerBusy}
+                  onClick={() => beginEdit(m)}
+                >
+                  Изм.
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={markerBusy}
+                  title="Удалить из приложения и из файла карты (KMZ/KML)"
+                  onClick={() => void removeMarker(m.id)}
+                >
                   Удалить
                 </button>
               </div>
@@ -873,8 +1389,8 @@ export function MapPage({ settings, onOpenCard }: Props) {
 
             <div className="muted" style={{ fontSize: "0.8rem" }}>
               {markerFile
-                ? `Метки записаны в рабочий файл: ${markerFile.path}`
-                : "Добавьте KML/KMZ в настройках — пользовательские метки будут записываться прямо в рабочий файл карты."}
+                ? `Метки сохраняются в файл карты: ${markerFile.path}. Кнопка «Удалить» убирает метку и из файла.`
+                : "Добавьте KML/KMZ в настройках — метки будут записываться в этот же файл карты."}
             </div>
             {markerFile && (
               <button
@@ -884,6 +1400,8 @@ export function MapPage({ settings, onOpenCard }: Props) {
               >
                 Открыть папку файла меток
               </button>
+            )}
+              </>
             )}
           </div>
         ) : (
@@ -904,15 +1422,24 @@ export function MapPage({ settings, onOpenCard }: Props) {
                 onDoubleClick={() => {
                   void selectHit(hit, query);
                   if (hit.kind === "card") onOpenCard(hit.id);
+                  if (hit.kind === "infocard") void openInfocardHit(hit);
                 }}
               >
                 <div className="title">
-                  <span className={`badge ${hit.kind === "card" ? "card" : hit.water_type || ""}`}>
-                    {hit.kind === "card"
-                      ? hit.subtitle.startsWith("№")
-                        ? hit.subtitle.split(" · ")[0]
-                        : "Карточка"
-                      : WATER_TYPE_SHORT[hit.water_type || "other"]}
+                  <span
+                    className={`badge ${
+                      hit.kind === "card" || hit.kind === "infocard"
+                        ? "card"
+                        : hit.water_type || ""
+                    }`}
+                  >
+                    {hit.kind === "infocard"
+                      ? "Infocard"
+                      : hit.kind === "card"
+                        ? hit.subtitle.startsWith("№")
+                          ? hit.subtitle.split(" · ")[0]
+                          : "Карточка"
+                        : WATER_TYPE_SHORT[hit.water_type || "other"]}
                   </span>
                   {hit.title}
                 </div>
@@ -931,18 +1458,47 @@ export function MapPage({ settings, onOpenCard }: Props) {
 
       <div className="map-pane">
         <div className="map-toolbar">
+          {!serverWaterMode && (
+            <>
           <button
             type="button"
             className={`btn ${pickMode ? "primary" : ""}`}
             onClick={() => {
-              setPickMode((v) => !v);
-              setDraft(null);
-              setSideMode("markers");
+              if (pickMode) {
+                setPickMode(false);
+                setMoveWaterId(null);
+                setPickForEditMarker(false);
+              } else {
+                setMoveWaterId(null);
+                setPickForEditMarker(false);
+                setPickMode(true);
+                setDraft(null);
+                setSideMode("markers");
+              }
             }}
           >
-            {pickMode ? "Отменить метку" : "Поставить метку"}
+            {pickMode
+              ? moveWaterId != null
+                ? "Отменить перенос"
+                : pickForEditMarker
+                  ? "Отменить выбор места"
+                  : "Отменить метку"
+              : "Поставить метку"}
           </button>
-          {pickMode && <span className="map-toolbar-hint">Щёлкните по карте</span>}
+          {pickMode && (
+            <span className="map-toolbar-hint">
+              {moveWaterId != null
+                ? "Щёлкните новое место для ИППВ"
+                : pickForEditMarker
+                  ? "Щёлкните новое место метки"
+                  : "Щёлкните по карте"}
+            </span>
+          )}
+            </>
+          )}
+          {serverWaterMode && (
+            <span className="map-toolbar-hint">Водоисточники с сервера · только просмотр</span>
+          )}
         </div>
 
         {useLocalMap ? (
@@ -955,6 +1511,9 @@ export function MapPage({ settings, onOpenCard }: Props) {
             points={points}
             focusId={focusId}
             searchPin={searchPin}
+            markers={markers}
+            pickMode={pickMode}
+            onPick={(lat, lon) => void onMapPick(lat, lon)}
             onBoundsChange={onBoundsChangeDebounced}
             onPointClick={onPointClick}
           />
@@ -970,8 +1529,8 @@ export function MapPage({ settings, onOpenCard }: Props) {
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
             <FlyTo center={center} zoom={focusZoom} />
-            <MapClickCatcher enabled={pickMode} onPick={(lat, lon) => startDraft(lat, lon)} />
-            <BoundsLoader types={ALL_TYPES} onPoints={setPoints} />
+            <MapClickCatcher enabled={pickMode} onPick={(lat, lon) => void onMapPick(lat, lon)} />
+            <BoundsLoader onBounds={onBoundsChangeDebounced} />
             <HouseNumbersLayer />
             {points.map((p) => (
               <Marker
@@ -1054,9 +1613,11 @@ export function MapPage({ settings, onOpenCard }: Props) {
               <div>
                 <dt>Тип</dt>
                 <dd>
-                  {selected.kind === "card"
-                    ? "Информационная карточка"
-                    : WATER_TYPE_SHORT[selected.water_type || "other"]}
+                  {selected.kind === "infocard"
+                    ? "Infocard (сервер)"
+                    : selected.kind === "card"
+                      ? "Информационная карточка"
+                      : WATER_TYPE_SHORT[selected.water_type || "other"]}
                 </dd>
               </div>
               <div>
@@ -1094,17 +1655,28 @@ export function MapPage({ settings, onOpenCard }: Props) {
                   Открыть карточку
                 </button>
               )}
-              <button
-                className="btn"
-                onClick={() =>
-                  void (async () => {
-                    await api.toggleFavorite(selected.kind, selected.id, selected.title);
-                    await refreshLists();
-                  })()
-                }
-              >
-                В избранное
-              </button>
+              {selected.kind === "infocard" && (
+                <button
+                  className="btn primary"
+                  disabled={markerBusy}
+                  onClick={() => void openInfocardHit(selected)}
+                >
+                  Открыть PDF
+                </button>
+              )}
+              {selected.kind !== "infocard" && (
+                <button
+                  className="btn"
+                  onClick={() =>
+                    void (async () => {
+                      await api.toggleFavorite(selected.kind, selected.id, selected.title);
+                      await refreshLists();
+                    })()
+                  }
+                >
+                  В избранное
+                </button>
+              )}
               {water && (
                 <button className="btn" onClick={() => moveTo(water.lat, water.lon, 16)}>
                   Показать на карте

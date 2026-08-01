@@ -1,6 +1,6 @@
 [package]
 name = "fire-atlas"
-version = "0.1.0"
+version = "0.1.11"
 description = "Пожарный Атлас — поиск ИППВ и информационных карточек"
 authors = ["FireAtlas"]
 edition = "2021"
@@ -29,7 +29,7 @@ base64 = "0.22"
 thiserror = "2"
 parking_lot = "0.12"
 open = { version = "5", features = ["shellexecute-on-windows"] }
-ureq = { version = "2.12", default-features = false, features = ["native-tls", "json"] }
+ureq = { version = "2.12", features = ["json"] }
 
 [profile.release]
 panic = "abort"

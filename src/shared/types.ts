@@ -2,7 +2,7 @@ export type WaterType = "hydrant" | "pond" | "tower" | "pier" | "other";
 
 export type MapProviderId = "yandex" | "dgis" | "osm" | "local";
 
-export type TabId = "map" | "cards" | "infocard" | "settings" | "about";
+export type TabId = "map" | "cards" | "settings" | "about";
 
 export interface AppSettings {
   data_path: string;
@@ -18,6 +18,10 @@ export interface AppSettings {
   infocard_api_base: string;
   infocard_enabled: boolean;
   infocard_login: string;
+  /** local | server | both */
+  cards_mode: string;
+  /** local | server — водоисточники на карте */
+  markers_mode: string;
 }
 
 export interface IndexStats {
@@ -43,7 +47,7 @@ export interface ReindexReport {
 
 export interface SearchHit {
   id: number;
-  kind: "water" | "card";
+  kind: "water" | "card" | "infocard";
   title: string;
   subtitle: string;
   water_type?: WaterType | null;
@@ -51,6 +55,9 @@ export interface SearchHit {
   lat?: number | null;
   lon?: number | null;
   distance_m?: number | null;
+  /** ID файла на сервере Infocard (когда kind === "infocard"). */
+  infocard_id?: string | null;
+  infocard_status?: string | null;
 }
 
 export interface WaterPoint {
@@ -109,6 +116,8 @@ export interface UserMarker {
   lat: number;
   lon: number;
   created_at: string;
+  /** Present when loaded from Infocard API */
+  server_id?: string | null;
 }
 
 export interface MarkerFileInfo {
