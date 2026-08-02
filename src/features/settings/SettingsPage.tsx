@@ -38,6 +38,7 @@ function normalize(form: AppSettings): AppSettings {
     markers_mode: ["local", "server"].includes(form.markers_mode)
       ? form.markers_mode
       : "local",
+    map_radius_km: Math.min(35, Math.max(5, Number(form.map_radius_km) || 16)),
   };
 }
 
@@ -151,7 +152,9 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [packages, setPackages] = useState<MapPackageInfo[]>([]);
   const [packCityName, setPackCityName] = useState(settings.default_city || "");
-  const [packRadiusKm, setPackRadiusKm] = useState(12);
+  const [packRadiusKm, setPackRadiusKm] = useState(
+    Math.min(35, Math.max(5, Math.round(settings.map_radius_km || 16)))
+  );
   const [packProgress, setPackProgress] = useState<MapPackProgress | null>(null);
   const [packDownloading, setPackDownloading] = useState(false);
 
@@ -177,10 +180,17 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
       default_city: settings.default_city || "",
       local_map_city_id: settings.local_map_city_id || "",
       local_map_path: settings.local_map_path || "",
+      map_radius_km: settings.map_radius_km || 16,
     });
     setCityQuery(settings.default_city || "");
+    if (!packDownloading) {
+      setPackRadiusKm(Math.min(35, Math.max(5, Math.round(settings.map_radius_km || 16))));
+      if (settings.default_city) {
+        setPackCityName(settings.default_city);
+      }
+    }
     // Не сбрасываем packCityName во время скачивания
-  }, [settings]);
+  }, [settings, packDownloading]);
 
   useEffect(() => {
     void refreshSources();
@@ -229,8 +239,15 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
             }));
             setCityQuery(info.name);
             setPackCityName(info.name);
+            if (info.radius_km && info.radius_km > 0) {
+              setPackRadiusKm(Math.round(info.radius_km));
+            }
             setMessage(
-              `Пакет «${info.name}» готов: ${info.tile_count} тайлов.\n${info.path}`
+              `Пакет «${info.name}» готов: ${info.tile_count} тайлов` +
+                (info.radius_km && info.radius_km > 0
+                  ? ` · радиус ${Math.round(info.radius_km)} км`
+                  : "") +
+                `\n${info.path}`
             );
             setMessageOk(true);
           } catch (e) {
@@ -458,7 +475,14 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
       error: null,
     });
     try {
-      await api.prepareMapPackage(name, packRadiusKm);
+      const radius = Math.min(35, Math.max(5, Math.round(packRadiusKm) || 16));
+      setPackRadiusKm(radius);
+      // Сохраняем радиус в настройки сразу — поле больше не «забывает» значение.
+      const next = normalize({ ...form, map_radius_km: radius });
+      setForm(next);
+      await api.saveSettings(next);
+      await onSaved(next);
+      await api.prepareMapPackage(name, radius);
     } catch (e) {
       setPackDownloading(false);
       setMessage(e instanceof Error ? e.message : String(e));
@@ -706,17 +730,23 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
           {form.default_city ? (
             <div className="muted">
               Сейчас: <strong>{form.default_city}</strong> ({form.default_lat.toFixed(4)},{" "}
-              {form.default_lon.toFixed(4)}). Поиск адресов ограничен радиусом{" "}
-              <strong>50 км</strong> вокруг этого города.
+              {form.default_lon.toFixed(4)}). Поиск адресов на карте — в радиусе{" "}
+              <strong>50 км</strong> вокруг этого города (отдельно от скачивания тайлов).
             </div>
           ) : (
             <div className="muted">
-              Укажите город для поиска адресов (радиус 50 км).
+              Укажите город для поиска адресов (радиус поиска 50 км).
             </div>
           )}
         </div>
 
         <div className="field">
+          <label>Скачать карту города (локальные тайлы)</label>
+          <div className="muted" style={{ marginBottom: 8, fontSize: 13 }}>
+            Радиус покрытия тайлов (5–35 км) сохраняется в настройках. Для района выезда обычно
+            нужно 25–35 км; при слишком большом радиусе скачивание может отклониться из‑за лимита
+            тайлов.
+          </div>
           <div className="row">
             <input
               value={packCityName}
@@ -735,9 +765,24 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
               max={35}
               step={1}
               value={packRadiusKm}
-              title="Радиус покрытия, км"
+              title="Радиус покрытия карты, км (сохраняется)"
               style={{ maxWidth: 90 }}
-              onChange={(e) => setPackRadiusKm(Number(e.target.value) || 16)}
+              onChange={(e) => {
+                const v = Math.min(35, Math.max(5, Number(e.target.value) || 16));
+                setPackRadiusKm(v);
+                setForm({ ...form, map_radius_km: v });
+              }}
+              onBlur={() => {
+                void (async () => {
+                  try {
+                    const next = normalize({ ...form, map_radius_km: packRadiusKm });
+                    await api.saveSettings(next);
+                    await onSaved(next);
+                  } catch {
+                    /* ignore blur save errors */
+                  }
+                })();
+              }}
             />
             <span className="muted" style={{ whiteSpace: "nowrap" }}>
               км
@@ -794,6 +839,9 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
           {form.local_map_path ? (
             <div className="status-banner ok">
               Активный пакет: <strong>{form.default_city || packCityName}</strong>
+              {form.map_radius_km
+                ? ` · радиус скачивания ${Math.round(form.map_radius_km)} км`
+                : ""}
             </div>
           ) : (
             <div className="status-banner warn">

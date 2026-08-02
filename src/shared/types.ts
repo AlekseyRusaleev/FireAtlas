@@ -22,6 +22,8 @@ export interface AppSettings {
   cards_mode: string;
   /** local | server — водоисточники на карте */
   markers_mode: string;
+  /** Радиус скачивания локальной карты, км (5–35) */
+  map_radius_km: number;
 }
 
 export interface IndexStats {
@@ -58,6 +60,9 @@ export interface SearchHit {
   /** ID файла на сервере Infocard (когда kind === "infocard"). */
   infocard_id?: string | null;
   infocard_status?: string | null;
+  /** Папка карточки на Infocard (для списка текст/графика). */
+  infocard_folder_id?: string | null;
+  infocard_folder_name?: string | null;
 }
 
 export interface WaterPoint {
@@ -189,6 +194,8 @@ export interface MapPackageInfo {
   max_zoom: number;
   tile_count: number;
   ready: boolean;
+  /** Радиус покрытия пакета, км (если известен) */
+  radius_km?: number;
 }
 
 export interface MapPackProgress {

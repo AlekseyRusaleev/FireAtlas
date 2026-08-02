@@ -19,6 +19,12 @@ pub struct InfocardFileHit {
     pub name: String,
     pub status: Option<String>,
     pub kind: Option<String>,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    #[serde(default)]
+    pub folder_name: Option<String>,
+    #[serde(default)]
+    pub has_pdf: Option<bool>,
 }
 
 fn session_path(app_data: &PathBuf) -> PathBuf {
@@ -255,10 +261,6 @@ pub fn infocard_search_files(
             .and_then(|v| v.as_str())
             .unwrap_or("file")
             .to_string();
-        // Поиск API отдаёт и папки — для открытия PDF они не нужны.
-        if kind == "folder" {
-            continue;
-        }
         let id = item
             .get("id")
             .or_else(|| item.get("_id"))
@@ -279,16 +281,173 @@ pub fn infocard_search_files(
             .get("status")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let folder_id = item
+            .get("folderId")
+            .or_else(|| item.get("folder_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        let folder_name = item
+            .get("folderName")
+            .or_else(|| item.get("folder_name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        let has_pdf = item.get("hasPdf").or_else(|| item.get("has_pdf")).and_then(|v| v.as_bool());
         if !id.is_empty() {
             out.push(InfocardFileHit {
                 id,
                 name,
                 status,
                 kind: Some(kind),
+                folder_id,
+                folder_name,
+                has_pdf,
             });
         }
     }
     Ok(out)
+}
+
+fn json_id(v: &serde_json::Value) -> Option<String> {
+    v.get("id")
+        .or_else(|| v.get("_id"))
+        .map(|x| {
+            x.as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| x.to_string().trim_matches('"').to_string())
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// Список файлов в папке карточки (текст + графика и т.п.).
+#[tauri::command]
+pub fn infocard_list_folder_files(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    folder_id: String,
+) -> Result<Vec<InfocardFileHit>, String> {
+    let base = api_base(&state);
+    let dir = app_data_dir(&app)?;
+    let session_file = session_path(&dir);
+    let mut session = load_session(&session_file);
+    if session.access_token.is_empty() {
+        return Err("Не выполнен вход в Infocard".into());
+    }
+    if folder_id.trim().is_empty() {
+        return Err("Нет идентификатора папки Infocard".into());
+    }
+
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut path = format!(
+            "/folders/{}/children?type=file&limit=100",
+            urlencoding_lite(folder_id.trim())
+        );
+        if let Some(c) = &cursor {
+            path.push_str(&format!("&cursor={}", urlencoding_lite(c)));
+        }
+        let resp = authorized_get(&base, &path, &mut session, &session_file)?;
+        let value: serde_json::Value = resp
+            .into_json()
+            .map_err(|e| format!("Infocard folder children JSON: {e}"))?;
+        let items = value
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for item in items {
+            let Some(id) = json_id(&item) else { continue };
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let has_pdf = item.get("hasPdf").or_else(|| item.get("has_pdf")).and_then(|v| v.as_bool());
+            out.push(InfocardFileHit {
+                id,
+                name,
+                status,
+                kind: Some("file".into()),
+                folder_id: Some(folder_id.clone()),
+                folder_name: None,
+                has_pdf,
+            });
+        }
+        let has_more = value
+            .get("hasMore")
+            .or_else(|| value.get("has_more"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        cursor = value
+            .get("nextCursor")
+            .or_else(|| value.get("next_cursor"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        if !has_more || cursor.is_none() {
+            break;
+        }
+        if out.len() > 500 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Метаданные файла — чтобы узнать folderId, если в поиске его не было.
+#[tauri::command]
+pub fn infocard_get_file(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    file_id: String,
+) -> Result<InfocardFileHit, String> {
+    let base = api_base(&state);
+    let dir = app_data_dir(&app)?;
+    let session_file = session_path(&dir);
+    let mut session = load_session(&session_file);
+    if session.access_token.is_empty() {
+        return Err("Не выполнен вход в Infocard".into());
+    }
+    let path = format!("/files/{}", urlencoding_lite(&file_id));
+    let resp = authorized_get(&base, &path, &mut session, &session_file)?;
+    let item: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| format!("Infocard file JSON: {e}"))?;
+    let id = json_id(&item).unwrap_or(file_id);
+    let name = item
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let status = item
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let folder_id = item
+        .get("folderId")
+        .or_else(|| item.get("folder_id"))
+        .map(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| v.to_string().trim_matches('"').to_string())
+        })
+        .filter(|s| !s.is_empty());
+    let has_pdf = item.get("hasPdf").or_else(|| item.get("has_pdf")).and_then(|v| v.as_bool());
+    Ok(InfocardFileHit {
+        id,
+        name,
+        status,
+        kind: Some("file".into()),
+        folder_id,
+        folder_name: None,
+        has_pdf,
+    })
 }
 
 #[tauri::command]
@@ -316,8 +475,7 @@ pub fn infocard_open_pdf(
     let mut reader = resp.into_reader();
     let mut file = fs::File::create(&dest).map_err(|e| e.to_string())?;
     std::io::copy(&mut reader, &mut file).map_err(|e| e.to_string())?;
-
-    open::that(&dest).map_err(|e| e.to_string())?;
+    // Путь к кэшу — UI открывает PDF внутри приложения (asset / iframe).
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -417,8 +575,20 @@ pub fn infocard_list_markers(
                 });
             }
         }
-        let lat = item.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let lon = item.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let lat = item
+            .get("lat")
+            .and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+            })
+            .unwrap_or(0.0);
+        let lon = item
+            .get("lon")
+            .and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+            })
+            .unwrap_or(0.0);
         let created_at = item
             .get("createdAt")
             .or_else(|| item.get("created_at"))

@@ -37,6 +37,9 @@ pub struct AppSettings {
     /// local | server — источник пользовательских меток на карте
     #[serde(default = "default_markers_mode")]
     pub markers_mode: String,
+    /// Радиус скачивания локальной карты, км (5–35)
+    #[serde(default = "default_map_radius_km")]
+    pub map_radius_km: f64,
 }
 
 fn default_infocard_api() -> String {
@@ -49,6 +52,10 @@ fn default_cards_mode() -> String {
 
 fn default_markers_mode() -> String {
     "local".into()
+}
+
+fn default_map_radius_km() -> f64 {
+    16.0
 }
 
 fn default_provider() -> String {
@@ -85,6 +92,7 @@ impl Default for AppSettings {
             infocard_login: String::new(),
             cards_mode: default_cards_mode(),
             markers_mode: default_markers_mode(),
+            map_radius_km: default_map_radius_km(),
         }
     }
 }

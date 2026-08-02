@@ -23,6 +23,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   infocard_login: "",
   cards_mode: "local",
   markers_mode: "local",
+  map_radius_km: 16,
 };
 
 export default function App() {

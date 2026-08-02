@@ -34,6 +34,9 @@ pub struct MapPackageMeta {
     pub tile_count: u32,
     pub created_at: String,
     pub source: String,
+    /// Радиус скачивания (км). Старые пакеты могут не иметь поля.
+    #[serde(default)]
+    pub radius_km: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +51,8 @@ pub struct MapPackageInfo {
     pub max_zoom: u32,
     pub tile_count: u32,
     pub ready: bool,
+    #[serde(default)]
+    pub radius_km: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,6 +301,12 @@ pub fn list_packages(data_path: &Path) -> Result<Vec<MapPackageInfo>, String> {
                 max_zoom: meta.max_zoom,
                 tile_count: meta.tile_count,
                 ready: true,
+                radius_km: if meta.radius_km > 0.0 {
+                    meta.radius_km
+                } else {
+                    // Старые пакеты: оценка по широте bbox
+                    ((meta.north - meta.south) * 111.0 / 2.0).clamp(5.0, 35.0)
+                },
             }),
             Err(_) => {
                 let id = path
@@ -314,6 +325,7 @@ pub fn list_packages(data_path: &Path) -> Result<Vec<MapPackageInfo>, String> {
                     max_zoom: 0,
                     tile_count: 0,
                     ready: false,
+                    radius_km: 0.0,
                 });
             }
         }
@@ -643,6 +655,7 @@ pub fn prepare_package(
         tile_count: ok,
         created_at: Local::now().to_rfc3339(),
         source: "Carto Voyager / Esri / OpenStreetMap raster tiles".into(),
+        radius_km: city.radius_km,
     };
     fs::write(
         dir.join("meta.json"),
@@ -682,6 +695,7 @@ pub fn prepare_package(
         max_zoom: meta.max_zoom,
         tile_count: meta.tile_count,
         ready: true,
+        radius_km: meta.radius_km,
     })
 }
 
@@ -774,6 +788,11 @@ pub fn import_package_zip(data_path: &Path, zip_path: &Path) -> Result<MapPackag
         max_zoom: meta.max_zoom,
         tile_count: meta.tile_count,
         ready: true,
+        radius_km: if meta.radius_km > 0.0 {
+            meta.radius_km
+        } else {
+            ((meta.north - meta.south) * 111.0 / 2.0).clamp(5.0, 35.0)
+        },
     })
 }
 

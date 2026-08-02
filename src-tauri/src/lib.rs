@@ -875,6 +875,9 @@ fn prepare_map_package(
                 settings.default_lat = info.lat;
                 settings.default_lon = info.lon;
                 settings.default_zoom = info.zoom;
+                if info.radius_km > 0.0 {
+                    settings.map_radius_km = info.radius_km.clamp(5.0, 35.0);
+                }
                 let _ = state2.store.save(&settings);
                 *state2.settings.lock() = settings;
                 let _ = app2.emit(
@@ -890,6 +893,7 @@ fn prepare_map_package(
                         max_zoom: info.max_zoom,
                         tile_count: info.tile_count,
                         ready: true,
+                        radius_km: info.radius_km,
                     },
                 );
             }
@@ -1033,6 +1037,11 @@ fn pick_map_package_folder(
         max_zoom: meta.max_zoom,
         tile_count: meta.tile_count,
         ready: true,
+        radius_km: if meta.radius_km > 0.0 {
+            meta.radius_km
+        } else {
+            ((meta.north - meta.south) * 111.0 / 2.0).clamp(5.0, 35.0)
+        },
     };
     let mut settings = state.settings.lock().clone();
     settings.local_map_city_id = info.id.clone();
@@ -1042,6 +1051,9 @@ fn pick_map_package_folder(
     settings.default_lat = info.lat;
     settings.default_lon = info.lon;
     settings.default_zoom = info.zoom;
+    if info.radius_km > 0.0 {
+        settings.map_radius_km = info.radius_km.clamp(5.0, 35.0);
+    }
     state.store.save(&settings)?;
     *state.settings.lock() = settings;
     Ok(info)
@@ -1131,6 +1143,8 @@ pub fn run() {
             infocard::infocard_login,
             infocard::infocard_logout,
             infocard::infocard_search_files,
+            infocard::infocard_list_folder_files,
+            infocard::infocard_get_file,
             infocard::infocard_open_pdf,
             infocard::infocard_list_markers,
             get_app_version,

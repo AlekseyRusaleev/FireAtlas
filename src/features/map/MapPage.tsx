@@ -21,7 +21,10 @@ import {
 } from "../../shared/types";
 import { LocalMapView } from "./LocalMapView";
 import { HouseNumbersLayer } from "./HouseNumbersLayer";
+import { WaterClusterLayer } from "./WaterClusterLayer";
 import type { SearchPin } from "./YandexMapView";
+import { PdfViewer } from "../../shared/PdfViewer";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   distanceKm,
   geocodeAddress,
@@ -38,10 +41,86 @@ L.Icon.Default.mergeOptions({
 
 const ALL_TYPES: WaterType[] = ["hydrant", "pond", "tower", "pier", "other"];
 const ADDRESS_ZOOM = 17;
+const INFOCARD_SEARCH_LIMIT = 100;
+
+function infocardFileRole(name: string): string {
+  const n = name.toLowerCase();
+  if (/\.(vsd|vsdx|vss|vst)x?$/i.test(n) || /схем|графич|visio|план/i.test(n)) {
+    return "Графическая часть";
+  }
+  if (/\.(doc|docx|rtf|odt)$/i.test(n) || /текст/i.test(n)) {
+    return "Текстовая часть";
+  }
+  if (/\.(jpe?g|png|tif{1,2}|webp|bmp)$/i.test(n)) return "Изображение";
+  if (/\.pdf$/i.test(n)) return "PDF";
+  return "Файл";
+}
+
+function groupInfocardSearchHits(files: api.InfocardFileHit[]): SearchHit[] {
+  type Group = {
+    folderId: string;
+    title: string;
+    fileId: string | null;
+    status: string | null;
+    pathHint: string | null;
+  };
+  const groups = new Map<string, Group>();
+  let anon = 0;
+
+  for (const f of files) {
+    const isFolder = (f.kind || "").toLowerCase() === "folder";
+    if (isFolder) {
+      if (!groups.has(f.id)) {
+        groups.set(f.id, {
+          folderId: f.id,
+          title: f.name || "Карточка",
+          fileId: null,
+          status: null,
+          pathHint: f.folder_name || null,
+        });
+      }
+      continue;
+    }
+    const folderId = f.folder_id || "";
+    const key = folderId || `file:${f.id}`;
+    const existing = groups.get(key);
+    if (!existing) {
+      const fromPath = f.folder_name?.split("/").pop()?.trim();
+      groups.set(key, {
+        folderId,
+        title: fromPath || f.name.replace(/\.[^.]+$/, "") || `Карточка ${++anon}`,
+        fileId: f.id,
+        status: f.status || null,
+        pathHint: f.folder_name || null,
+      });
+    } else if (!existing.fileId) {
+      existing.fileId = f.id;
+      existing.status = f.status || null;
+    }
+  }
+
+  return [...groups.values()].map((g, i) => {
+    const ready = (g.status || "").toLowerCase() === "ready";
+    return {
+      id: -(i + 1),
+      kind: "infocard" as const,
+      title: g.title,
+      subtitle: g.pathHint
+        ? `Infocard · ${g.pathHint}`
+        : ready
+          ? "Infocard · есть PDF"
+          : "Infocard · карточка",
+      infocard_id: g.fileId,
+      infocard_status: g.status,
+      infocard_folder_id: g.folderId || null,
+      infocard_folder_name: g.title,
+    };
+  });
+}
 /** Поиск адресов и объектов ограничен этим радиусом вокруг города по умолчанию. */
 const SEARCH_RADIUS_KM = 50;
 /** Сколько точек максимум рисовать на карте за раз — больше сильно подвисает UI. */
-const MAP_POINTS_LIMIT = 800;
+const MAP_POINTS_LIMIT = 5000;
 
 function guessWaterType(name: string, comment?: string | null): WaterType {
   const t = `${name} ${comment || ""}`.toLowerCase();
@@ -197,21 +276,6 @@ function addressFromSubtitle(subtitle: string): string | null {
   return null;
 }
 
-function typeColor(t: WaterType): string {
-  switch (t) {
-    case "hydrant":
-      return "#e74c3c";
-    case "pond":
-      return "#3498db";
-    case "tower":
-      return "#f39c12";
-    case "pier":
-      return "#1abc9c";
-    default:
-      return "#95a5a6";
-  }
-}
-
 function dotIcon(color: string, size: number, ring = false) {
   return L.divIcon({
     className: "",
@@ -221,10 +285,6 @@ function dotIcon(color: string, size: number, ring = false) {
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
   });
-}
-
-function makeIcon(type: WaterType) {
-  return dotIcon(typeColor(type), 14);
 }
 
 const SEARCH_PIN_ICON = dotIcon("#ffcc00", 18, true);
@@ -370,6 +430,11 @@ export function MapPage({ settings, onOpenCard }: Props) {
   const [markerError, setMarkerError] = useState<string | null>(null);
   const [markerBusy, setMarkerBusy] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [infocardFiles, setInfocardFiles] = useState<api.InfocardFileHit[]>([]);
+  const [infocardFilesError, setInfocardFilesError] = useState<string | null>(null);
+  const [pdfPreview, setPdfPreview] = useState<{ url: string; title: string; path: string } | null>(
+    null
+  );
   const draftNameRef = useRef<HTMLInputElement>(null);
 
   const useLocalMap = Boolean(settings.local_map_path);
@@ -545,24 +610,18 @@ export function MapPage({ settings, onOpenCard }: Props) {
         let infocardHits: SearchHit[] = [];
         if (wantServerCards && q.length >= 2) {
           try {
-            const files = await api.infocardSearchFiles(query.trim(), 40);
-            infocardHits = files.map((f, i) => ({
-              id: -(i + 1),
-              kind: "infocard" as const,
-              title: f.name || f.id,
-              subtitle:
-                (f.status || "").toLowerCase() === "ready"
-                  ? "Infocard · PDF готов"
-                  : `Infocard · ${f.status || "файл"}`,
-              infocard_id: f.id,
-              infocard_status: f.status,
-            }));
-          } catch {
-            /* нет сессии */
+            const files = await api.infocardSearchFiles(query.trim(), INFOCARD_SEARCH_LIMIT);
+            infocardHits = groupInfocardSearchHits(files);
+          } catch (err) {
+            setGeoError(
+              err instanceof Error
+                ? err.message
+                : "Не удалось искать карточки Infocard (проверьте вход в настройках)"
+            );
           }
         }
 
-        setHits([...cardHits, ...infocardHits, ...waterHits].slice(0, 50));
+        setHits([...cardHits, ...infocardHits, ...waterHits].slice(0, 80));
         setActiveIndex(0);
       })();
     }, 180);
@@ -613,11 +672,14 @@ export function MapPage({ settings, onOpenCard }: Props) {
     setSelected(hit);
     setGeoError(null);
     setMoveWaterId(null);
+    setInfocardFiles([]);
+    setInfocardFilesError(null);
 
     if (hit.kind === "infocard") {
       setWater(null);
       setFocusId(null);
       setNearby([]);
+      void loadInfocardCardFiles(hit);
       return;
     }
 
@@ -869,6 +931,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
       setMarkerError(
         "Серверные водоисточники правятся в веб-кабинете Infocard. В приложении — только просмотр."
       );
+      setSideMode("markers");
       return;
     }
     setPickMode(false);
@@ -953,22 +1016,62 @@ export function MapPage({ settings, onOpenCard }: Props) {
     setSideMode("search");
   }
 
-  async function openInfocardHit(hit: SearchHit) {
-    const fileId = hit.infocard_id;
-    if (!fileId) {
-      setGeoError("Нет идентификатора файла Infocard");
-      return;
+  async function loadInfocardCardFiles(hit: SearchHit) {
+    setInfocardFilesError(null);
+    setMarkerBusy(true);
+    try {
+      let folderId = hit.infocard_folder_id || null;
+      if (!folderId && hit.infocard_id) {
+        const meta = await api.infocardGetFile(hit.infocard_id);
+        folderId = meta.folder_id || null;
+      }
+      if (!folderId) {
+        if (hit.infocard_id) {
+          setInfocardFiles([
+            {
+              id: hit.infocard_id,
+              name: hit.title,
+              status: hit.infocard_status,
+              kind: "file",
+              folder_id: null,
+              has_pdf: (hit.infocard_status || "").toLowerCase() === "ready",
+            },
+          ]);
+        } else {
+          setInfocardFilesError("Не удалось определить папку карточки на сервере");
+        }
+        return;
+      }
+      const files = await api.infocardListFolderFiles(folderId);
+      setInfocardFiles(files);
+      if (files.length === 0) {
+        setInfocardFilesError("В папке карточки нет файлов");
+      }
+    } catch (e) {
+      setInfocardFilesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMarkerBusy(false);
     }
-    if ((hit.infocard_status || "").toLowerCase() !== "ready") {
+  }
+
+  async function openInfocardFile(file: api.InfocardFileHit) {
+    const ready =
+      file.has_pdf === true || (file.status || "").toLowerCase() === "ready";
+    if (!ready) {
       setGeoError(
-        "PDF ещё не готов (Visio/фото/Word конвертируются на сервере). Подождите и обновите поиск."
+        "PDF ещё не готов (Visio/фото/Word конвертируются на сервере). Подождите и обновите список."
       );
       return;
     }
     setMarkerBusy(true);
     setGeoError(null);
     try {
-      await api.infocardOpenPdf(fileId);
+      const path = await api.infocardOpenPdf(file.id);
+      setPdfPreview({
+        url: convertFileSrc(path),
+        title: `${infocardFileRole(file.name)} · ${file.name}`,
+        path,
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setGeoError(
@@ -979,6 +1082,10 @@ export function MapPage({ settings, onOpenCard }: Props) {
     } finally {
       setMarkerBusy(false);
     }
+  }
+
+  async function openInfocardHit(hit: SearchHit) {
+    await loadInfocardCardFiles(hit);
   }
 
   async function saveDraft() {
@@ -1422,7 +1529,6 @@ export function MapPage({ settings, onOpenCard }: Props) {
                 onDoubleClick={() => {
                   void selectHit(hit, query);
                   if (hit.kind === "card") onOpenCard(hit.id);
-                  if (hit.kind === "infocard") void openInfocardHit(hit);
                 }}
               >
                 <div className="title">
@@ -1532,20 +1638,13 @@ export function MapPage({ settings, onOpenCard }: Props) {
             <MapClickCatcher enabled={pickMode} onPick={(lat, lon) => void onMapPick(lat, lon)} />
             <BoundsLoader onBounds={onBoundsChangeDebounced} />
             <HouseNumbersLayer />
-            {points.map((p) => (
-              <Marker
-                key={p.id}
-                position={[p.lat, p.lon]}
-                icon={makeIcon(p.water_type)}
-                eventHandlers={{ click: () => onPointClick(p) }}
-              >
-                <Popup>
-                  <strong>{p.name}</strong>
-                  <br />
-                  {WATER_TYPE_SHORT[p.water_type]}
-                </Popup>
-              </Marker>
-            ))}
+            <WaterClusterLayer
+              points={points}
+              focusId={focusId}
+              pickMode={pickMode}
+              onPointClick={onPointClick}
+              onPick={(lat, lon) => void onMapPick(lat, lon)}
+            />
             {markers.map((m) => (
               <Marker key={`um-${m.id}`} position={[m.lat, m.lon]} icon={USER_MARKER_ICON}>
                 <Popup>
@@ -1661,7 +1760,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
                   disabled={markerBusy}
                   onClick={() => void openInfocardHit(selected)}
                 >
-                  Открыть PDF
+                  {infocardFiles.length > 0 ? "Обновить список файлов" : "Открыть карточку"}
                 </button>
               )}
               {selected.kind !== "infocard" && (
@@ -1684,10 +1783,68 @@ export function MapPage({ settings, onOpenCard }: Props) {
               )}
             </div>
 
+            {selected.kind === "infocard" && (
+              <div className="infocard-files" style={{ marginTop: 12 }}>
+                <h3 style={{ margin: "0 0 8px", fontSize: 15 }}>Файлы карточки</h3>
+                {infocardFilesError && <div className="error">{infocardFilesError}</div>}
+                {markerBusy && infocardFiles.length === 0 && (
+                  <div className="muted">Загрузка файлов…</div>
+                )}
+                {infocardFiles.length > 0 && (
+                  <div className="list">
+                    {infocardFiles.map((f) => {
+                      const ready =
+                        f.has_pdf === true || (f.status || "").toLowerCase() === "ready";
+                      return (
+                        <div
+                          key={f.id}
+                          className="list-item"
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 8,
+                          }}
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <strong style={{ display: "block" }}>{infocardFileRole(f.name)}</strong>
+                            <div className="muted" style={{ fontSize: 12, wordBreak: "break-word" }}>
+                              {f.name}
+                              {!ready ? ` · ${f.status || "не готов"}` : " · PDF готов"}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn primary"
+                            disabled={markerBusy || !ready}
+                            onClick={() => void openInfocardFile(f)}
+                          >
+                            Открыть
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             <NearbySection nearby={nearby} onSelect={selectNearby} />
           </>
         )}
       </aside>
+      {pdfPreview && (
+        <PdfViewer
+          url={pdfPreview.url}
+          title={pdfPreview.title}
+          onClose={() => setPdfPreview(null)}
+          onOpenExternal={() => {
+            void api.openPath(pdfPreview.path).catch((e) => {
+              setGeoError(e instanceof Error ? e.message : String(e));
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

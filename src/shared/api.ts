@@ -219,6 +219,9 @@ export interface InfocardFileHit {
   name: string;
   status?: string | null;
   kind?: string | null;
+  folder_id?: string | null;
+  folder_name?: string | null;
+  has_pdf?: boolean | null;
 }
 
 export async function infocardGetSession(): Promise<InfocardSession> {
@@ -238,12 +241,23 @@ export async function infocardLogout(): Promise<void> {
 
 export async function infocardSearchFiles(
   query: string,
-  limit = 50
+  limit = 100
 ): Promise<InfocardFileHit[]> {
   return invoke("infocard_search_files", { query, limit });
 }
 
+export async function infocardListFolderFiles(
+  folderId: string
+): Promise<InfocardFileHit[]> {
+  return invoke("infocard_list_folder_files", { folderId });
+}
+
+export async function infocardGetFile(fileId: string): Promise<InfocardFileHit> {
+  return invoke("infocard_get_file", { fileId });
+}
+
 export async function infocardOpenPdf(fileId: string): Promise<string> {
+  /** Скачивает PDF в кэш и возвращает локальный путь (без внешнего открытия). */
   return invoke("infocard_open_pdf", { fileId });
 }
 

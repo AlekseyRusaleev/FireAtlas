@@ -3,35 +3,10 @@ import { MapContainer, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import "leaflet/dist/leaflet.css";
-import type { WaterPoint, WaterType } from "../../shared/types";
+import type { WaterPoint } from "../../shared/types";
 import type { SearchPin } from "./YandexMapView";
 import { HouseNumbersLayer } from "./HouseNumbersLayer";
-
-function typeColor(t: WaterType): string {
-  switch (t) {
-    case "hydrant":
-      return "#e74c3c";
-    case "pond":
-      return "#3498db";
-    case "tower":
-      return "#f39c12";
-    case "pier":
-      return "#1abc9c";
-    default:
-      return "#95a5a6";
-  }
-}
-
-function makeIcon(type: WaterType, focus: boolean) {
-  const color = typeColor(type);
-  const size = focus ? 16 : 12;
-  return L.divIcon({
-    className: "",
-    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5)"></div>`,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-  });
-}
+import { WaterClusterLayer } from "./WaterClusterLayer";
 
 const SEARCH_PIN_ICON = L.divIcon({
   className: "",
@@ -152,29 +127,15 @@ function MarkersLayer({
   onPointClick: (p: WaterPoint) => void;
   onPick?: (lat: number, lon: number) => void;
 }) {
-  const map = useMap();
-  useEffect(() => {
-    const group = L.layerGroup().addTo(map);
-    for (const p of points) {
-      const m = L.marker([p.lat, p.lon], {
-        icon: makeIcon(p.water_type, focusId === p.id),
-      });
-      m.on("click", (e) => {
-        L.DomEvent.stopPropagation(e);
-        if (pickMode) {
-          onPick?.(p.lat, p.lon);
-        } else {
-          onPointClick(p);
-        }
-      });
-      m.bindTooltip(p.name);
-      m.addTo(group);
-    }
-    return () => {
-      map.removeLayer(group);
-    };
-  }, [map, points, focusId, pickMode, onPointClick, onPick]);
-  return null;
+  return (
+    <WaterClusterLayer
+      points={points}
+      focusId={focusId}
+      pickMode={pickMode}
+      onPointClick={onPointClick}
+      onPick={onPick}
+    />
+  );
 }
 
 function SearchPinLayer({ searchPin }: { searchPin: SearchPin | null }) {
