@@ -159,12 +159,15 @@ fn write_helper_script(
     staging: &Path,
     install_dir: &Path,
     exe_name: &str,
+    temp_root: &Path,
 ) -> Result<(), String> {
     let staging_s = staging.display().to_string().replace('/', "\\");
     let install_s = install_dir.display().to_string().replace('/', "\\");
+    let temp_root_s = temp_root.display().to_string().replace('/', "\\");
     let exe_path = install_dir.join(exe_name);
     let exe_s = exe_path.display().to_string().replace('/', "\\");
-    // cmd helper: wait for process, copy files, relaunch
+    // cmd helper: wait for process, copy files, relaunch, remove staging leftovers.
+    // Script lives outside temp_root so rmdir can delete the whole update folder.
     let body = format!(
         "@echo off\r\n\
 setlocal\r\n\
@@ -179,11 +182,14 @@ if errorlevel 1 (\r\n\
   exit /b 1\r\n\
 )\r\n\
 start \"\" \"{exe}\"\r\n\
-endlocal\r\n",
+rmdir /s /q \"{temp_root}\" >nul 2>&1\r\n\
+endlocal\r\n\
+del \"%~f0\" >nul 2>&1\r\n",
         pid = pid,
         staging = staging_s,
         install = install_s,
-        exe = exe_s
+        exe = exe_s,
+        temp_root = temp_root_s
     );
     fs::write(script_path, body).map_err(|e| format!("Не удалось записать helper: {e}"))?;
     Ok(())
@@ -263,7 +269,11 @@ pub fn download_and_apply_update(app: tauri::AppHandle, url: String, sha256: Str
         found.unwrap_or(staging.clone())
     };
 
-    let script_path = temp_root.join("update-fireatlas.cmd");
+    // Helper вне temp_root — иначе Windows не даст удалить папку со скриптом внутри.
+    let script_path = std::env::temp_dir().join(format!(
+        "update-fireatlas-{}.cmd",
+        std::process::id()
+    ));
     write_helper_script(
         &script_path,
         std::process::id(),
@@ -274,6 +284,7 @@ pub fn download_and_apply_update(app: tauri::AppHandle, url: String, sha256: Str
         } else {
             "FireAtlas.exe"
         },
+        &temp_root,
     )?;
     spawn_helper_detached(&script_path)?;
 
