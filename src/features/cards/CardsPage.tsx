@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "../../shared/api";
+import { PdfViewer } from "../../shared/PdfViewer";
 import type { Card, CardFile } from "../../shared/types";
 
 interface Props {
@@ -35,8 +36,21 @@ function canPreviewInApp(file: CardFile): boolean {
   return false;
 }
 
-function previewHint(file: CardFile): string {
+function fileStem(name: string): string {
+  const idx = name.lastIndexOf(".");
+  return (idx >= 0 ? name.slice(0, idx) : name).trim().toLowerCase();
+}
+
+function findPdfFallback(file: CardFile, files: CardFile[]): CardFile | null {
+  const pdfs = files.filter((item) => item.kind === "pdf");
+  if (pdfs.length === 0) return null;
+  const stem = fileStem(file.name);
+  return pdfs.find((item) => fileStem(item.name) === stem) ?? pdfs[0] ?? null;
+}
+
+function previewHint(file: CardFile, files: CardFile[]): string {
   if (canPreviewInApp(file)) return "откроется в окне программы";
+  if (findPdfFallback(file, files)) return "для просмотра откроется PDF этой карточки";
   if (file.kind === "word") {
     return "старый формат .doc — только во внешнем Word (сохраните как .docx для просмотра внутри)";
   }
@@ -54,6 +68,10 @@ function base64ToBytes(b64: string): Uint8Array {
 function bytesToBlobUrl(bytes: Uint8Array, mime: string): string {
   const copy = Uint8Array.from(bytes);
   return URL.createObjectURL(new Blob([copy.buffer], { type: mime }));
+}
+
+function hasPreviewableFiles(files: CardFile[]): boolean {
+  return files.some(canPreviewInApp);
 }
 
 export function CardsPage({ initialCardId = null }: Props) {
@@ -178,9 +196,11 @@ export function CardsPage({ initialCardId = null }: Props) {
     setOpenedExternally(false);
     setActiveFile(file);
     try {
-      if (file.kind === "jpg") {
-        const b64 = await api.readFileBase64(file.path);
-        const ext = fileExt(file);
+      const previewTarget =
+        canPreviewInApp(file) || !selected ? file : findPdfFallback(file, selected.files) ?? file;
+      if (previewTarget.kind === "jpg") {
+        const b64 = await api.readFileBase64(previewTarget.path);
+        const ext = fileExt(previewTarget);
         const mime =
           ext === "png"
             ? "image/png"
@@ -192,18 +212,21 @@ export function CardsPage({ initialCardId = null }: Props) {
         const url = bytesToBlobUrl(base64ToBytes(b64), mime);
         previewUrlRef.current = url;
         setPreviewUrl({ mime, url });
+        setActiveFile(previewTarget);
         return;
       }
-      if (file.kind === "pdf") {
-        const b64 = await api.readFileBase64(file.path);
+      if (previewTarget.kind === "pdf") {
+        const b64 = await api.readFileBase64(previewTarget.path);
         const url = bytesToBlobUrl(base64ToBytes(b64), "application/pdf");
         previewUrlRef.current = url;
         setPreviewUrl({ mime: "application/pdf", url });
+        setActiveFile(previewTarget);
         return;
       }
-      if (file.kind === "word" && fileExt(file) === "docx") {
-        const b64 = await api.readFileBase64(file.path);
+      if (previewTarget.kind === "word" && fileExt(previewTarget) === "docx") {
+        const b64 = await api.readFileBase64(previewTarget.path);
         setDocxBytes(base64ToBytes(b64));
+        setActiveFile(previewTarget);
         return;
       }
       // .doc / Visio и прочее — только внешне, с понятным пояснением.
@@ -297,6 +320,13 @@ export function CardsPage({ initialCardId = null }: Props) {
                 содержимое.
               </div>
             )}
+            {selected.files.length > 0 && !hasPreviewableFiles(selected.files) && (
+              <div className="status-banner" style={{ marginBottom: "0.75rem" }}>
+                В этой карточке сейчас только старые файлы `DOC` / `Visio`. Встроенный просмотр
+                работает только для `PDF`, изображений и `DOCX`, поэтому эти документы открываются
+                внешними программами.
+              </div>
+            )}
 
             <div className="doc-rows">
               {selected.files.map((f) => (
@@ -306,7 +336,7 @@ export function CardsPage({ initialCardId = null }: Props) {
                       {fileLabel(f)}: {f.name}
                     </strong>
                     <div className="muted" style={{ fontSize: "0.8rem" }}>
-                      {previewHint(f)}
+                      {previewHint(f, selected.files)}
                     </div>
                   </div>
                   <div className="actions">
@@ -347,13 +377,6 @@ export function CardsPage({ initialCardId = null }: Props) {
                 style={{ marginTop: "1rem" }}
               />
             )}
-            {previewUrl?.mime === "application/pdf" && (
-              <iframe
-                title="pdf"
-                src={previewUrl.url}
-                style={{ width: "100%", height: "70vh", border: 0, marginTop: "1rem" }}
-              />
-            )}
             <div
               ref={docxHostRef}
               className={`docx-host ${docxBytes ? "" : "is-empty"}`}
@@ -362,6 +385,20 @@ export function CardsPage({ initialCardId = null }: Props) {
           </>
         )}
       </section>
+      {previewUrl?.mime === "application/pdf" && activeFile && (
+        <PdfViewer
+          url={previewUrl.url}
+          title={`${fileLabel(activeFile)} · ${activeFile.name}`}
+          onClose={() => {
+            revokePreviewUrl();
+            setPreviewUrl(null);
+            setActiveFile(null);
+          }}
+          onOpenExternal={() => {
+            void openExternally(activeFile);
+          }}
+        />
+      )}
     </div>
   );
 }
