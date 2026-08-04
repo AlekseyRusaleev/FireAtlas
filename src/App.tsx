@@ -56,6 +56,13 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
+    if ((settings.cards_mode || "local") === "server") {
+      setOpenCardId(null);
+      setTab((t) => (t === "cards" ? "map" : t));
+    }
+  }, [settings.cards_mode]);
+
+  useEffect(() => {
     const timer = window.setTimeout(() => {
       void api
         .checkForUpdates()
@@ -101,7 +108,8 @@ export default function App() {
   }
 
   const cardsMode = settings.cards_mode || "local";
-  // Локальный просмотр файлов ИК — при local/both, или при открытии карточки с карты.
+  // Локальный просмотр файлов ИК — только при local/both.
+  // В режиме «Сервер Infocard» карточки открываются на карте как PDF, без вкладки локальных DOC/Visio.
   const showCardsTab = cardsMode === "local" || cardsMode === "both";
 
   return (
@@ -114,7 +122,7 @@ export default function App() {
           <button className={`tab ${tab === "map" ? "active" : ""}`} onClick={() => setTab("map")}>
             Карта
           </button>
-          {(showCardsTab || openCardId != null) && (
+          {showCardsTab && (
             <button
               className={`tab ${tab === "cards" ? "active" : ""}`}
               onClick={() => setTab("cards")}
@@ -177,12 +185,13 @@ export default function App() {
           <MapPage
             settings={settings}
             onOpenCard={(id) => {
+              if (!showCardsTab) return;
               setOpenCardId(id);
               setTab("cards");
             }}
           />
         )}
-        {tab === "cards" && (showCardsTab || openCardId != null) && (
+        {tab === "cards" && showCardsTab && (
           <CardsPage initialCardId={openCardId} />
         )}
         {tab === "settings" && (
@@ -191,6 +200,7 @@ export default function App() {
             stats={stats}
             onSaved={async (next) => {
               setSettings(next);
+              setOpenCardId(null);
               await refresh();
             }}
             onReindexed={async () => {

@@ -816,28 +816,52 @@ export function MapPage({ settings, onOpenCard }: Props) {
       const searches = [q, found.label, compactQuery].filter(
         (s, i, arr) => s.trim().length > 0 && arr.indexOf(s) === i
       );
-      const batches = await Promise.all(searches.map((s) => api.search(s, ALL_TYPES, 80)));
+      const cardsMode = settings.cards_mode || "local";
+      const wantLocalCards = cardsMode === "local" || cardsMode === "both";
+      const wantServerCards = cardsMode === "server" || cardsMode === "both";
 
-      const cardMap = new Map<number, SearchHit>();
-      for (const hit of batches.flat()) {
-        if (hit.kind !== "card") continue;
-        if (
-          hitMatchesAddress(hit, parsed.streetTokens, parsed.house) ||
-          hitMatchesAddress(hit, geocodedParsed.streetTokens, geocodedParsed.house) ||
-          (compactParts.length > 0 &&
-            hitMatchesAddress(
-              hit,
-              parsed.streetTokens.length ? parsed.streetTokens : geocodedParsed.streetTokens,
-              parsed.house || geocodedParsed.house
-            ))
-        ) {
-          cardMap.set(hit.id, hit);
+      const cards: SearchHit[] = [];
+      if (wantLocalCards) {
+        const batches = await Promise.all(searches.map((s) => api.search(s, ALL_TYPES, 80)));
+        const cardMap = new Map<number, SearchHit>();
+        for (const hit of batches.flat()) {
+          if (hit.kind !== "card") continue;
+          if (
+            hitMatchesAddress(hit, parsed.streetTokens, parsed.house) ||
+            hitMatchesAddress(hit, geocodedParsed.streetTokens, geocodedParsed.house) ||
+            (compactParts.length > 0 &&
+              hitMatchesAddress(
+                hit,
+                parsed.streetTokens.length ? parsed.streetTokens : geocodedParsed.streetTokens,
+                parsed.house || geocodedParsed.house
+              ))
+          ) {
+            cardMap.set(hit.id, hit);
+          }
+        }
+        cards.push(...cardMap.values());
+      }
+
+      let infocardHits: SearchHit[] = [];
+      if (wantServerCards) {
+        try {
+          // Ищем по адресу/дому на Infocard — не подмешиваем локальные DOC/Visio.
+          const files = await api.infocardSearchFiles(
+            compactQuery || q,
+            INFOCARD_SEARCH_LIMIT
+          );
+          infocardHits = groupInfocardSearchHits(files);
+        } catch (err) {
+          setGeoError(
+            err instanceof Error
+              ? err.message
+              : "Не удалось искать карточки Infocard (проверьте вход в настройках)"
+          );
         }
       }
 
-      const cards = [...cardMap.values()];
       const waters = nearbyPoints.map(nearbyToSearchHit);
-      setHits([...cards, ...waters].slice(0, 40));
+      setHits([...infocardHits, ...cards, ...waters].slice(0, 40));
       setActiveIndex(0);
     } catch (e) {
       setSearchPin(null);
@@ -1795,6 +1819,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
                     {infocardFiles.map((f) => {
                       const ready =
                         f.has_pdf === true || (f.status || "").toLowerCase() === "ready";
+                      const looksNativePdf = /\.pdf$/i.test(f.name);
                       return (
                         <div
                           key={f.id}
@@ -1810,7 +1835,11 @@ export function MapPage({ settings, onOpenCard }: Props) {
                             <strong style={{ display: "block" }}>{infocardFileRole(f.name)}</strong>
                             <div className="muted" style={{ fontSize: 12, wordBreak: "break-word" }}>
                               {f.name}
-                              {!ready ? ` · ${f.status || "не готов"}` : " · PDF готов"}
+                              {!ready
+                                ? ` · ${f.status || "не готов"}`
+                                : looksNativePdf
+                                  ? " · PDF внутри программы"
+                                  : " · откроется PDF (конвертация Infocard)"}
                             </div>
                           </div>
                           <button
@@ -1819,7 +1848,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
                             disabled={markerBusy || !ready}
                             onClick={() => void openInfocardFile(f)}
                           >
-                            Открыть
+                            Открыть PDF
                           </button>
                         </div>
                       );
