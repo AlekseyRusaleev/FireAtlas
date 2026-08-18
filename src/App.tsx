@@ -155,9 +155,8 @@ export default function App() {
       {updateOffer && !updateDismissed && (
         <div className="update-banner">
           <div className="update-banner-text">
-            <strong>Доступна версия {updateOffer.version}</strong>
-            {updateOffer.notes ? <span> — {updateOffer.notes}</span> : null}
-            {updateError ? <div className="error-text">{updateError}</div> : null}
+            Доступна {updateOffer.version}
+            {updateError ? <span className="error-text"> · {updateError}</span> : null}
           </div>
           <div className="update-banner-actions">
             <button

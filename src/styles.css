@@ -583,26 +583,32 @@ button {
 .update-banner {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.65rem 1rem;
+  gap: 0.5rem;
+  padding: 0.2rem 0.75rem;
   background: #243447;
   border-bottom: 1px solid var(--border);
+  min-height: 0;
 }
 
 .update-banner-text {
-  color: var(--text);
-  font-size: 0.95rem;
-}
-
-.update-banner-text span {
   color: var(--text-muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
 }
 
 .update-banner-actions {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.35rem;
   flex-shrink: 0;
+}
+
+.update-banner-actions .btn {
+  padding: 0.2rem 0.65rem;
+  font-size: 0.8rem;
 }
 
 .about-update {
