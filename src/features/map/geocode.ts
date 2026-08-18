@@ -26,7 +26,7 @@ const DEFAULT_RADIUS_KM = 50;
 /** Self-hosted Nominatim (сейчас — Кемеровская область). */
 const OWN_NOMINATIM_BASE = "https://geo.infocardmchs.ru";
 
-const STREET_STOP = new Set([
+export const STREET_STOP = new Set([
   "улица",
   "ул",
   "проспект",
@@ -50,7 +50,7 @@ const STREET_STOP = new Set([
 ]);
 
 /** Слова места/региона — не улица; в названиях ИК их часто нет. */
-const PLACE_STOP = new Set([
+export const PLACE_STOP = new Set([
   "россия",
   "область",
   "край",

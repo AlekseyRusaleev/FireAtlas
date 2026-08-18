@@ -30,6 +30,8 @@ import {
   geocodeAddress,
   parseAddressQuery,
   suggestAddresses,
+  PLACE_STOP,
+  STREET_STOP,
   type AddressSuggestion,
 } from "./geocode";
 
@@ -266,6 +268,98 @@ function nearbyToSearchHit(n: NearbyPoint): SearchHit {
     lon: n.lon,
     distance_m: n.distance_m,
   };
+}
+
+function uniqueNonEmpty(items: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of items) {
+    const s = raw?.trim();
+    if (!s || seen.has(s.toLowerCase())) continue;
+    seen.add(s.toLowerCase());
+    out.push(s);
+  }
+  return out;
+}
+
+function isPostalOrIndex(token: string): boolean {
+  return /^\d{5,6}$/.test(token);
+}
+
+/** Разбор запроса на независимые оси: название объекта, улица, номер дома. */
+function infocardSearchAxes(raw: string, city?: string): {
+  original: string;
+  objectName: string;
+  street: string;
+  house: string | null;
+} {
+  const original = raw.trim();
+  const parsed = parseAddressQuery(original);
+  const cityLc = city?.trim().toLowerCase() || "";
+  const words = original
+    .toLowerCase()
+    .replace(/[«»"'№]/g, " ")
+    .split(/[\s,./]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2 && !isPostalOrIndex(t));
+
+  const streetNums = [...original.matchAll(/\d+[а-яa-z]?/gi)]
+    .map((m) => m[0].toLowerCase())
+    .filter((n) => n !== (parsed.house || "") && !isPostalOrIndex(n));
+
+  const streetSet = new Set([...parsed.streetTokens, ...streetNums]);
+  const objectWords = words.filter((w) => {
+    if (STREET_STOP.has(w) || PLACE_STOP.has(w)) return false;
+    if (cityLc && w === cityLc) return false;
+    if (parsed.house && w === parsed.house) return false;
+    if (streetSet.has(w)) return false;
+    if (/^\d+[а-яa-z]?$/i.test(w)) return false;
+    return true;
+  });
+
+  return {
+    original,
+    objectName: uniqueNonEmpty(objectWords).join(" "),
+    street: uniqueNonEmpty([...streetNums, ...parsed.streetTokens]).join(" "),
+    house: parsed.house,
+  };
+}
+
+/** Несколько запросов к Infocard: как ввели + название + улица + дом (API требует все слова сразу). */
+function infocardSearchQueries(raw: string, extra?: string | null, city?: string): string[] {
+  const axes = infocardSearchAxes(raw, city);
+  const extraAxes = extra ? infocardSearchAxes(extra, city) : null;
+  const streetAndHouse = uniqueNonEmpty([axes.street, axes.house]).join(" ");
+  const extraStreetAndHouse = extraAxes
+    ? uniqueNonEmpty([extraAxes.street, extraAxes.house]).join(" ")
+    : "";
+  return uniqueNonEmpty([
+    axes.original,
+    extra?.trim(),
+    axes.objectName,
+    extraAxes?.objectName,
+    streetAndHouse,
+    extraStreetAndHouse,
+    axes.street,
+    extraAxes?.street,
+    // Номер дома отдельно — если искали именно его или вместе с улицей его уже учли выше.
+    !axes.street && !axes.objectName ? axes.house : null,
+  ]).filter((q) => q.length >= 2);
+}
+
+async function searchInfocardHits(queries: string[]): Promise<SearchHit[]> {
+  const batches = await Promise.all(
+    queries.map((q) =>
+      api.infocardSearchFiles(q, INFOCARD_SEARCH_LIMIT).catch(() => [] as api.InfocardFileHit[])
+    )
+  );
+  const grouped = groupInfocardSearchHits(batches.flat());
+  const map = new Map<string, SearchHit>();
+  for (const hit of grouped) {
+    const key = hit.infocard_folder_id || hit.infocard_id || `${hit.title}:${hit.id}`;
+    map.set(key, hit);
+  }
+  return [...map.values()];
 }
 
 function addressFromSubtitle(subtitle: string): string | null {
@@ -610,8 +704,8 @@ export function MapPage({ settings, onOpenCard }: Props) {
         let infocardHits: SearchHit[] = [];
         if (wantServerCards && q.length >= 2) {
           try {
-            const files = await api.infocardSearchFiles(query.trim(), INFOCARD_SEARCH_LIMIT);
-            infocardHits = groupInfocardSearchHits(files);
+            const queries = infocardSearchQueries(query.trim(), null, settings.default_city);
+            infocardHits = await searchInfocardHits(queries);
           } catch (err) {
             setGeoError(
               err instanceof Error
@@ -630,6 +724,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
     query,
     settings.default_lat,
     settings.default_lon,
+    settings.default_city,
     settings.cards_mode,
     serverWaterMode,
     serverPointsAll,
@@ -845,12 +940,8 @@ export function MapPage({ settings, onOpenCard }: Props) {
       let infocardHits: SearchHit[] = [];
       if (wantServerCards) {
         try {
-          // Ищем по адресу/дому на Infocard — не подмешиваем локальные DOC/Visio.
-          const files = await api.infocardSearchFiles(
-            compactQuery || q,
-            INFOCARD_SEARCH_LIMIT
-          );
-          infocardHits = groupInfocardSearchHits(files);
+          const queries = infocardSearchQueries(q, found.label, settings.default_city);
+          infocardHits = await searchInfocardHits(queries);
         } catch (err) {
           setGeoError(
             err instanceof Error

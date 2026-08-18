@@ -153,6 +153,13 @@ fn extract_zip(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn ps_single_quote(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('/', "\\")
+        .replace('\'', "''")
+}
+
 fn write_helper_script(
     script_path: &Path,
     pid: u32,
@@ -161,37 +168,72 @@ fn write_helper_script(
     exe_name: &str,
     temp_root: &Path,
 ) -> Result<(), String> {
-    let staging_s = staging.display().to_string().replace('/', "\\");
-    let install_s = install_dir.display().to_string().replace('/', "\\");
-    let temp_root_s = temp_root.display().to_string().replace('/', "\\");
-    let exe_path = install_dir.join(exe_name);
-    let exe_s = exe_path.display().to_string().replace('/', "\\");
-    // cmd helper: wait for process, copy files, relaunch, remove staging leftovers.
-    // Script lives outside temp_root so rmdir can delete the whole update folder.
+    let staging_s = ps_single_quote(staging);
+    let install_s = ps_single_quote(install_dir);
+    let temp_root_s = ps_single_quote(temp_root);
+    let exe_name_s = exe_name.replace('\'', "''");
+    // PowerShell: copy over the running exe name AND FireAtlas.exe, then retarget shortcuts.
+    // Otherwise NSIS/ярлык открывает «Пожарный Атлас.exe», а в папку легла только FireAtlas.exe —
+    // после закрытия снова стартует старая версия.
     let body = format!(
-        "@echo off\r\n\
-setlocal\r\n\
-rem FireAtlas portable updater\r\n\
-timeout /t 2 /nobreak >nul\r\n\
-taskkill /PID {pid} /F >nul 2>&1\r\n\
-timeout /t 1 /nobreak >nul\r\n\
-xcopy /Y /E /I /Q \"{staging}\\*\" \"{install}\\\" >nul\r\n\
-if errorlevel 1 (\r\n\
-  echo Update copy failed\r\n\
-  pause\r\n\
-  exit /b 1\r\n\
-)\r\n\
-start \"\" \"{exe}\"\r\n\
-rmdir /s /q \"{temp_root}\" >nul 2>&1\r\n\
-endlocal\r\n\
-del \"%~f0\" >nul 2>&1\r\n",
+        "$ErrorActionPreference = 'Continue'\r\n\
+$staging = '{staging}'\r\n\
+$install = '{install}'\r\n\
+$exeName = '{exe_name}'\r\n\
+$tempRoot = '{temp_root}'\r\n\
+Start-Sleep -Seconds 2\r\n\
+Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue\r\n\
+Get-Process | Where-Object {{ $_.Path -and $_.Path.StartsWith($install, $true, [Globalization.CultureInfo]::InvariantCulture) }} | Stop-Process -Force -ErrorAction SilentlyContinue\r\n\
+Start-Sleep -Seconds 2\r\n\
+$srcExe = Join-Path $staging $exeName\r\n\
+if (-not (Test-Path -LiteralPath $srcExe)) {{ $srcExe = Join-Path $staging 'FireAtlas.exe' }}\r\n\
+$copied = $false\r\n\
+for ($i = 0; $i -lt 12; $i++) {{\r\n\
+  Copy-Item -Path (Join-Path $staging '*') -Destination $install -Recurse -Force -ErrorAction SilentlyContinue\r\n\
+  if (Test-Path -LiteralPath $srcExe) {{\r\n\
+    $targets = New-Object System.Collections.Generic.List[string]\r\n\
+    [void]$targets.Add((Join-Path $install $exeName))\r\n\
+    [void]$targets.Add((Join-Path $install 'FireAtlas.exe'))\r\n\
+    [void]$targets.Add((Join-Path $install 'fire-atlas.exe'))\r\n\
+    Get-ChildItem -LiteralPath $install -Filter '*.exe' -ErrorAction SilentlyContinue | ForEach-Object {{\r\n\
+      if ($_.Name -match 'FireAtlas|fire-atlas|Атлас|Atlas') {{ [void]$targets.Add($_.FullName) }}\r\n\
+    }}\r\n\
+    $targets | Select-Object -Unique | ForEach-Object {{\r\n\
+      Copy-Item -LiteralPath $srcExe -Destination $_ -Force -ErrorAction SilentlyContinue\r\n\
+    }}\r\n\
+  }}\r\n\
+  $launch = Join-Path $install $exeName\r\n\
+  if (-not (Test-Path -LiteralPath $launch)) {{ $launch = Join-Path $install 'FireAtlas.exe' }}\r\n\
+  if ((Test-Path -LiteralPath $launch) -and ((Get-Item -LiteralPath $launch).Length -gt 1000000)) {{ $copied = $true; break }}\r\n\
+  Start-Sleep -Seconds 1\r\n\
+}}\r\n\
+if (-not $copied) {{ exit 1 }}\r\n\
+$launch = Join-Path $install $exeName\r\n\
+if (-not (Test-Path -LiteralPath $launch)) {{ $launch = Join-Path $install 'FireAtlas.exe' }}\r\n\
+try {{\r\n\
+  $ws = New-Object -ComObject WScript.Shell\r\n\
+  $dirs = @([Environment]::GetFolderPath('Desktop'), (Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs'))\r\n\
+  foreach ($dir in $dirs) {{\r\n\
+    if (-not (Test-Path -LiteralPath $dir)) {{ continue }}\r\n\
+    $lnk = Join-Path $dir 'Пожарный Атлас.lnk'\r\n\
+    $s = $ws.CreateShortcut($lnk)\r\n\
+    $s.TargetPath = $launch\r\n\
+    $s.WorkingDirectory = $install\r\n\
+    $s.Save()\r\n\
+  }}\r\n\
+}} catch {{ }}\r\n\
+Start-Process -FilePath $launch -WorkingDirectory $install\r\n\
+Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue\r\n\
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n",
         pid = pid,
         staging = staging_s,
         install = install_s,
-        exe = exe_s,
+        exe_name = exe_name_s,
         temp_root = temp_root_s
     );
-    fs::write(script_path, body).map_err(|e| format!("Не удалось записать helper: {e}"))?;
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend(body.as_bytes());
+    fs::write(script_path, bytes).map_err(|e| format!("Не удалось записать helper: {e}"))?;
     Ok(())
 }
 
@@ -200,8 +242,14 @@ fn spawn_helper_detached(script_path: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
-    Command::new("cmd.exe")
-        .args(["/C", &script_path.to_string_lossy()])
+    Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            &script_path.to_string_lossy(),
+        ])
         .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
         .spawn()
         .map_err(|e| format!("Не удалось запустить установщик обновления: {e}"))?;
@@ -227,9 +275,9 @@ pub fn download_and_apply_update(app: tauri::AppHandle, url: String, sha256: Str
         .to_path_buf();
     let exe_name = current_exe
         .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("FireAtlas.exe")
-        .to_string();
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "FireAtlas.exe".to_string());
 
     let temp_root = std::env::temp_dir().join(format!("fireatlas-update-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp_root);
@@ -271,7 +319,7 @@ pub fn download_and_apply_update(app: tauri::AppHandle, url: String, sha256: Str
 
     // Helper вне temp_root — иначе Windows не даст удалить папку со скриптом внутри.
     let script_path = std::env::temp_dir().join(format!(
-        "update-fireatlas-{}.cmd",
+        "update-fireatlas-{}.ps1",
         std::process::id()
     ));
     write_helper_script(
