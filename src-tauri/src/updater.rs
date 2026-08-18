@@ -153,92 +153,109 @@ fn extract_zip(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ps_single_quote(path: &Path) -> String {
-    path.display()
-        .to_string()
-        .replace('/', "\\")
-        .replace('\'', "''")
+fn write_helper_script(script_path: &Path) -> Result<(), String> {
+    // Пути не вшиваются в файл: кириллица в UTF-8 .ps1 на WinPS 5.1 превращалась
+    // в «РђС‚Р»Р°СЃ» и создавала дубликаты папки на C:\. Аргументы идут как UTF-16.
+    let body = r#"param(
+  [Parameter(Mandatory=$true)][string]$Install,
+  [Parameter(Mandatory=$true)][string]$Staging,
+  [Parameter(Mandatory=$true)][string]$TempRoot,
+  [Parameter(Mandatory=$true)][string]$ExeName,
+  [Parameter(Mandatory=$true)][int]$AppPid
+)
+$ErrorActionPreference = 'Continue'
+Start-Sleep -Seconds 2
+Stop-Process -Id $AppPid -Force -ErrorAction SilentlyContinue
+Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($Install, $true, [Globalization.CultureInfo]::InvariantCulture) } | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+$srcExe = Join-Path $Staging $ExeName
+if (-not (Test-Path -LiteralPath $srcExe)) { $srcExe = Join-Path $Staging 'FireAtlas.exe' }
+$copied = $false
+for ($i = 0; $i -lt 12; $i++) {
+  if (-not (Test-Path -LiteralPath $Install)) { New-Item -ItemType Directory -Path $Install -Force | Out-Null }
+  Copy-Item -Path (Join-Path $Staging '*') -Destination $Install -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $srcExe) {
+    $targets = New-Object System.Collections.Generic.List[string]
+    [void]$targets.Add((Join-Path $Install $ExeName))
+    [void]$targets.Add((Join-Path $Install 'FireAtlas.exe'))
+    [void]$targets.Add((Join-Path $Install 'fire-atlas.exe'))
+    Get-ChildItem -LiteralPath $Install -Filter '*.exe' -ErrorAction SilentlyContinue | ForEach-Object {
+      if ($_.Name -match 'FireAtlas|fire-atlas|Атлас|Atlas') { [void]$targets.Add($_.FullName) }
+    }
+    $targets | Select-Object -Unique | ForEach-Object {
+      Copy-Item -LiteralPath $srcExe -Destination $_ -Force -ErrorAction SilentlyContinue
+    }
+  }
+  $launch = Join-Path $Install $ExeName
+  if (-not (Test-Path -LiteralPath $launch)) { $launch = Join-Path $Install 'FireAtlas.exe' }
+  if ((Test-Path -LiteralPath $launch) -and ((Get-Item -LiteralPath $launch).Length -gt 1000000)) { $copied = $true; break }
+  Start-Sleep -Seconds 1
 }
-
-fn write_helper_script(
-    script_path: &Path,
-    pid: u32,
-    staging: &Path,
-    install_dir: &Path,
-    exe_name: &str,
-    temp_root: &Path,
-) -> Result<(), String> {
-    let staging_s = ps_single_quote(staging);
-    let install_s = ps_single_quote(install_dir);
-    let temp_root_s = ps_single_quote(temp_root);
-    let exe_name_s = exe_name.replace('\'', "''");
-    // PowerShell: copy over the running exe name AND FireAtlas.exe, then retarget shortcuts.
-    // Otherwise NSIS/ярлык открывает «Пожарный Атлас.exe», а в папку легла только FireAtlas.exe —
-    // после закрытия снова стартует старая версия.
-    let body = format!(
-        "$ErrorActionPreference = 'Continue'\r\n\
-$staging = '{staging}'\r\n\
-$install = '{install}'\r\n\
-$exeName = '{exe_name}'\r\n\
-$tempRoot = '{temp_root}'\r\n\
-Start-Sleep -Seconds 2\r\n\
-Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue\r\n\
-Get-Process | Where-Object {{ $_.Path -and $_.Path.StartsWith($install, $true, [Globalization.CultureInfo]::InvariantCulture) }} | Stop-Process -Force -ErrorAction SilentlyContinue\r\n\
-Start-Sleep -Seconds 2\r\n\
-$srcExe = Join-Path $staging $exeName\r\n\
-if (-not (Test-Path -LiteralPath $srcExe)) {{ $srcExe = Join-Path $staging 'FireAtlas.exe' }}\r\n\
-$copied = $false\r\n\
-for ($i = 0; $i -lt 12; $i++) {{\r\n\
-  Copy-Item -Path (Join-Path $staging '*') -Destination $install -Recurse -Force -ErrorAction SilentlyContinue\r\n\
-  if (Test-Path -LiteralPath $srcExe) {{\r\n\
-    $targets = New-Object System.Collections.Generic.List[string]\r\n\
-    [void]$targets.Add((Join-Path $install $exeName))\r\n\
-    [void]$targets.Add((Join-Path $install 'FireAtlas.exe'))\r\n\
-    [void]$targets.Add((Join-Path $install 'fire-atlas.exe'))\r\n\
-    Get-ChildItem -LiteralPath $install -Filter '*.exe' -ErrorAction SilentlyContinue | ForEach-Object {{\r\n\
-      if ($_.Name -match 'FireAtlas|fire-atlas|Атлас|Atlas') {{ [void]$targets.Add($_.FullName) }}\r\n\
-    }}\r\n\
-    $targets | Select-Object -Unique | ForEach-Object {{\r\n\
-      Copy-Item -LiteralPath $srcExe -Destination $_ -Force -ErrorAction SilentlyContinue\r\n\
-    }}\r\n\
-  }}\r\n\
-  $launch = Join-Path $install $exeName\r\n\
-  if (-not (Test-Path -LiteralPath $launch)) {{ $launch = Join-Path $install 'FireAtlas.exe' }}\r\n\
-  if ((Test-Path -LiteralPath $launch) -and ((Get-Item -LiteralPath $launch).Length -gt 1000000)) {{ $copied = $true; break }}\r\n\
-  Start-Sleep -Seconds 1\r\n\
-}}\r\n\
-if (-not $copied) {{ exit 1 }}\r\n\
-$launch = Join-Path $install $exeName\r\n\
-if (-not (Test-Path -LiteralPath $launch)) {{ $launch = Join-Path $install 'FireAtlas.exe' }}\r\n\
-try {{\r\n\
-  $ws = New-Object -ComObject WScript.Shell\r\n\
-  $dirs = @([Environment]::GetFolderPath('Desktop'), (Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs'))\r\n\
-  foreach ($dir in $dirs) {{\r\n\
-    if (-not (Test-Path -LiteralPath $dir)) {{ continue }}\r\n\
-    $lnk = Join-Path $dir 'Пожарный Атлас.lnk'\r\n\
-    $s = $ws.CreateShortcut($lnk)\r\n\
-    $s.TargetPath = $launch\r\n\
-    $s.WorkingDirectory = $install\r\n\
-    $s.Save()\r\n\
-  }}\r\n\
-}} catch {{ }}\r\n\
-Start-Process -FilePath $launch -WorkingDirectory $install\r\n\
-Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue\r\n\
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n",
-        pid = pid,
-        staging = staging_s,
-        install = install_s,
-        exe_name = exe_name_s,
-        temp_root = temp_root_s
-    );
-    let mut bytes = vec![0xEF, 0xBB, 0xBF];
-    bytes.extend(body.as_bytes());
+if (-not $copied) { exit 1 }
+$launch = Join-Path $Install $ExeName
+if (-not (Test-Path -LiteralPath $launch)) { $launch = Join-Path $Install 'FireAtlas.exe' }
+try {
+  $ws = New-Object -ComObject WScript.Shell
+  $dirs = @([Environment]::GetFolderPath('Desktop'), (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'))
+  foreach ($dir in $dirs) {
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    foreach ($lnkName in @('Пожарный Атлас.lnk', 'FireAtlas.exe - ярлык.lnk', 'FireAtlas.lnk')) {
+      $lnk = Join-Path $dir $lnkName
+      $s = $ws.CreateShortcut($lnk)
+      $s.TargetPath = $launch
+      $s.WorkingDirectory = $Install
+      $s.Save()
+    }
+    Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -ErrorAction SilentlyContinue | ForEach-Object {
+      try {
+        $sc = $ws.CreateShortcut($_.FullName)
+        if ($sc.TargetPath -and ($sc.TargetPath -like '*FireAtlas.exe*' -or $sc.TargetPath -like '*Атлас.exe*' -or $sc.TargetPath -like '*fire-atlas.exe*')) {
+          $sc.TargetPath = $launch
+          $sc.WorkingDirectory = $Install
+          $sc.Save()
+        }
+      } catch {}
+    }
+  }
+} catch {}
+# Удалить дубликаты папки, появившиеся из-за кракозябр в пути (UTF-8 как CP1251).
+try {
+  $parent = Split-Path -Parent $Install
+  $realName = Split-Path -Leaf $Install
+  $utf8 = [Text.Encoding]::UTF8
+  $cp1251 = [Text.Encoding]::GetEncoding(1251)
+  $v1 = $cp1251.GetString($utf8.GetBytes($realName))
+  $v2 = $utf8.GetString($cp1251.GetBytes($realName))
+  $v3 = $cp1251.GetString($utf8.GetBytes($v1))
+  $bad = @($v1, $v2, $v3) | Where-Object { $_ -and $_ -ne $realName } | Select-Object -Unique
+  Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.FullName -eq $Install) { return }
+    if ($bad -notcontains $_.Name) { return }
+    if (-not (Test-Path -LiteralPath (Join-Path $_.FullName 'FireAtlas.exe'))) { return }
+    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+  }
+} catch {}
+Start-Process -FilePath $launch -WorkingDirectory $Install
+Remove-Item -LiteralPath $TempRoot -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+"#;
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in body.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
     fs::write(script_path, bytes).map_err(|e| format!("Не удалось записать helper: {e}"))?;
     Ok(())
 }
 
 #[cfg(windows)]
-fn spawn_helper_detached(script_path: &Path) -> Result<(), String> {
+fn spawn_helper_detached(
+    script_path: &Path,
+    staging: &Path,
+    install_dir: &Path,
+    temp_root: &Path,
+    exe_name: &str,
+    pid: u32,
+) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -248,8 +265,18 @@ fn spawn_helper_detached(script_path: &Path) -> Result<(), String> {
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            &script_path.to_string_lossy(),
         ])
+        .arg(script_path)
+        .arg("-Install")
+        .arg(install_dir)
+        .arg("-Staging")
+        .arg(staging)
+        .arg("-TempRoot")
+        .arg(temp_root)
+        .arg("-ExeName")
+        .arg(exe_name)
+        .arg("-AppPid")
+        .arg(pid.to_string())
         .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
         .spawn()
         .map_err(|e| format!("Не удалось запустить установщик обновления: {e}"))?;
@@ -257,7 +284,14 @@ fn spawn_helper_detached(script_path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn spawn_helper_detached(_script_path: &Path) -> Result<(), String> {
+fn spawn_helper_detached(
+    _script_path: &Path,
+    _staging: &Path,
+    _install_dir: &Path,
+    _temp_root: &Path,
+    _exe_name: &str,
+    _pid: u32,
+) -> Result<(), String> {
     Err("Автообновление поддерживается только на Windows".into())
 }
 
@@ -322,19 +356,20 @@ pub fn download_and_apply_update(app: tauri::AppHandle, url: String, sha256: Str
         "update-fireatlas-{}.ps1",
         std::process::id()
     ));
-    write_helper_script(
+    let helper_exe = if staging_effective.join(&exe_name).is_file() {
+        exe_name.as_str()
+    } else {
+        "FireAtlas.exe"
+    };
+    write_helper_script(&script_path)?;
+    spawn_helper_detached(
         &script_path,
-        std::process::id(),
         &staging_effective,
         &install_dir,
-        if staging_effective.join(&exe_name).is_file() {
-            &exe_name
-        } else {
-            "FireAtlas.exe"
-        },
         &temp_root,
+        helper_exe,
+        std::process::id(),
     )?;
-    spawn_helper_detached(&script_path)?;
 
     // Дать helper стартовать, затем закрыть приложение
     std::thread::sleep(std::time::Duration::from_millis(400));
