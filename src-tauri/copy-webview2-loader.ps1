@@ -35,3 +35,9 @@ if (-not $loader) {
 $destination = Join-Path $releaseDir "WebView2Loader.dll"
 Copy-Item $loader.FullName $destination -Force
 Write-Host "WebView2Loader.dll copied to $destination"
+
+# Рядом с исходниками — чтобы NSIS положил DLL в папку установки, а не только portable ZIP.
+$bundleDest = Join-Path $PSScriptRoot "resources\WebView2Loader.dll"
+New-Item -ItemType Directory -Force -Path (Split-Path $bundleDest) | Out-Null
+Copy-Item $loader.FullName $bundleDest -Force
+Write-Host "WebView2Loader.dll copied to $bundleDest"

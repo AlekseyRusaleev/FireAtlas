@@ -40,4 +40,7 @@ WebView2Loader.dll
 *.exe
 *.dll
 !src-tauri/**/*.dll
+server/updates/*.zip
+server/updates/*-setup.exe
+server/updates/FireAtlas-Setup.exe
 

@@ -1,9 +1,15 @@
 # Канал обновлений FireAtlas
 
-Публичный манифест и ZIP-сборки:
+Публичные файлы:
 
 - `https://geo.infocardmchs.ru/updates/latest.json`
-- `https://geo.infocardmchs.ru/updates/FireAtlas-<версия>-portable.zip`
+- `https://geo.infocardmchs.ru/updates/FireAtlas-Setup.exe` — установщик для **новых** компьютеров (всегда последняя версия)
+- `https://geo.infocardmchs.ru/updates/FireAtlas-<версия>-setup.exe` — тот же установщик с номером версии
+- `https://geo.infocardmchs.ru/updates/FireAtlas-<версия>-portable.zip` — для кнопки «Обновить» в уже установленной программе
+
+Новым пользователям отдавайте **установщик**, не рабочую папку с `FireData` и настройками.
+
+Установщик кладёт `FireAtlas.exe` и `WebView2Loader.dll` в `%LOCALAPPDATA%\FireAtlas\` и при необходимости ставит Microsoft Edge WebView2 Runtime (встроенный bootstrapper). Без DLL Windows показывает ошибку «не обнаружила WebView2Loader.dll».
 
 ## На сервере (один раз)
 
@@ -27,24 +33,25 @@ location /updates/ {
 ## Выкладка нового релиза
 
 1. Поднять версию в `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`.
-2. Собрать portable: `npm run tauri:build`, скопировать `FireAtlas.exe` в `dist-app/FireAtlas-portable/`, сделать ZIP.
-3. Посчитать хеш:
+2. Собрать NSIS: `node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis`.
+   Установщик: `FireAtlas_<версия>_x64-setup.exe`.
+3. Portable ZIP: `FireAtlas.exe` + копия `fire-atlas.exe` + `WebView2Loader.dll`.
+4. Посчитать хеш ZIP и setup.exe:
 
-```bash
-# Windows PowerShell
-Get-FileHash .\FireAtlas-0.1.1-portable.zip -Algorithm SHA256
-
-# Linux
-sha256sum FireAtlas-0.1.1-portable.zip
+```powershell
+Get-FileHash .\FireAtlas-0.1.33-portable.zip -Algorithm SHA256
+Get-FileHash .\FireAtlas-0.1.33-setup.exe -Algorithm SHA256
 ```
 
-4. Положить ZIP и `latest.json` в `/var/www/fireatlas-updates/`:
+5. Положить файлы в `/var/www/fireatlas-updates/`:
 
 ```bash
-sudo cp FireAtlas-0.1.1-portable.zip latest.json /var/www/fireatlas-updates/
+sudo cp FireAtlas-0.1.33-portable.zip FireAtlas-0.1.33-setup.exe FireAtlas-Setup.exe latest.json /var/www/fireatlas-updates/
 sudo chown www-data:www-data /var/www/fireatlas-updates/*
 ```
 
-5. В `latest.json` указать точный `version`, `url` и `sha256` (нижний регистр hex без пробелов).
+`FireAtlas-Setup.exe` — копия текущего setup (стабильная ссылка).
 
-Клиент при старте читает `latest.json`, сравнивает версию и предлагает обновить portable-сборку.
+6. В `latest.json` указать `version`, `portable` и `installer` (`url` + `sha256`, hex в нижнем регистре).
+
+Клиент при старте читает `latest.json` и обновляет **уже установленную** копию через portable ZIP. Установщик нужен только для первой установки на новом ПК.

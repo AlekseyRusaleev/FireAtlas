@@ -239,6 +239,32 @@ function addressFromCardTitle(title: string): string | null {
   return null;
 }
 
+/** «…Институт ул. Институтская, 3» → «ул. Институтская, 3». */
+function streetAddressFromInfocard(title: string): string | null {
+  const m = title.match(
+    /(?:ул\.?|улица|пр\.?-?т\.?|проспект|пер\.?|переулок|пл\.?|площадь|б-р|бульвар|шоссе|наб\.?|набережная)\s*[^,]*,?\s*\d+[а-яa-z/\-]*/i
+  );
+  if (m) return m[0].replace(/\s+/g, " ").trim();
+  return addressFromCardTitle(title);
+}
+
+function infocardGeocodeCandidates(hit: SearchHit, city: string): string[] {
+  const folder = hit.infocard_folder_name || "";
+  const path = hit.subtitle.replace(/^Infocard\s*·\s*/i, "").trim();
+  const parsed = parseAddressQuery(hit.title);
+  const streetHouse = [...parsed.streetTokens, parsed.house || ""].filter(Boolean).join(" ");
+  return uniqueNonEmpty([
+    streetAddressFromInfocard(hit.title),
+    streetAddressFromInfocard(folder),
+    streetAddressFromInfocard(path),
+    streetHouse || null,
+    hit.address,
+    hit.title,
+    folder,
+    path,
+  ]).map((x) => normalizeAddressForGeocode(x, city));
+}
+
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -325,35 +351,49 @@ function infocardSearchAxes(raw: string, city?: string): {
   };
 }
 
-/** Несколько запросов к Infocard: как ввели + название + улица + дом (API требует все слова сразу). */
+function looksLikeGeocoderDump(raw: string): boolean {
+  const tokens = raw
+    .toLowerCase()
+    .split(/[\s,./]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const placeHits = tokens.filter((t) => PLACE_STOP.has(t)).length;
+  return placeHits >= 2 && tokens.length >= 5;
+}
+
+/** Один-два запроса к Infocard: как ввели (без хвоста геокодера) + значимые слова. */
 function infocardSearchQueries(raw: string, extra?: string | null, city?: string): string[] {
   const axes = infocardSearchAxes(raw, city);
   const extraAxes = extra ? infocardSearchAxes(extra, city) : null;
-  const streetAndHouse = uniqueNonEmpty([axes.street, axes.house]).join(" ");
-  const extraStreetAndHouse = extraAxes
-    ? uniqueNonEmpty([extraAxes.street, extraAxes.house]).join(" ")
+  const significant = uniqueNonEmpty([axes.objectName, axes.street, axes.house]).join(" ");
+  const extraSignificant = extraAxes
+    ? uniqueNonEmpty([extraAxes.objectName, extraAxes.street, extraAxes.house]).join(" ")
     : "";
   return uniqueNonEmpty([
-    axes.original,
-    extra?.trim(),
-    axes.objectName,
-    extraAxes?.objectName,
-    streetAndHouse,
-    extraStreetAndHouse,
-    axes.street,
-    extraAxes?.street,
-    // Номер дома отдельно — если искали именно его или вместе с улицей его уже учли выше.
-    !axes.street && !axes.objectName ? axes.house : null,
+    looksLikeGeocoderDump(axes.original) ? null : axes.original,
+    significant,
+    extraSignificant,
   ]).filter((q) => q.length >= 2);
 }
 
 async function searchInfocardHits(queries: string[]): Promise<SearchHit[]> {
-  const batches = await Promise.all(
-    queries.map((q) =>
-      api.infocardSearchFiles(q, INFOCARD_SEARCH_LIMIT).catch(() => [] as api.InfocardFileHit[])
-    )
+  if (queries.length === 0) return [];
+  const settled = await Promise.allSettled(
+    queries.map((q) => api.infocardSearchFiles(q, INFOCARD_SEARCH_LIMIT))
   );
-  const grouped = groupInfocardSearchHits(batches.flat());
+  const files: api.InfocardFileHit[] = [];
+  const errors: string[] = [];
+  for (const item of settled) {
+    if (item.status === "fulfilled") {
+      files.push(...item.value);
+    } else {
+      errors.push(item.reason instanceof Error ? item.reason.message : String(item.reason));
+    }
+  }
+  if (files.length === 0 && errors.length > 0) {
+    throw new Error(errors[0]);
+  }
+  const grouped = groupInfocardSearchHits(files);
   const map = new Map<string, SearchHit>();
   for (const hit of grouped) {
     const key = hit.infocard_folder_id || hit.infocard_id || `${hit.title}:${hit.id}`;
@@ -384,13 +424,21 @@ function dotIcon(color: string, size: number, ring = false) {
 const SEARCH_PIN_ICON = dotIcon("#ffcc00", 18, true);
 const USER_MARKER_ICON = dotIcon("#9b59b6", 16);
 
-function FlyTo({ center, zoom }: { center: [number, number]; zoom: number }) {
+function FlyTo({
+  center,
+  zoom,
+  nonce = 0,
+}: {
+  center: [number, number];
+  zoom: number;
+  nonce?: number;
+}) {
   const map = useMap();
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   useEffect(() => {
-    map.flyTo(center, Math.max(map.getZoom(), zoomRef.current), { duration: 0.6 });
-  }, [center, map]);
+    map.flyTo(center, Math.max(map.getZoom(), zoomRef.current), { duration: 0.22 });
+  }, [center[0], center[1], nonce, map]);
   return null;
 }
 
@@ -500,6 +548,9 @@ export function MapPage({ settings, onOpenCard }: Props) {
     settings.default_lon,
   ]);
   const [focusZoom, setFocusZoom] = useState(settings.default_zoom || 13);
+  const [focusNonce, setFocusNonce] = useState(0);
+  const [detailDismissed, setDetailDismissed] = useState(false);
+  const infocardFocusGen = useRef(0);
   const [focusId, setFocusId] = useState<number | null>(null);
   const [localPack, setLocalPack] = useState<MapPackageInfo | null>(null);
   const [history, setHistory] = useState<SearchHit[]>([]);
@@ -645,12 +696,15 @@ export function MapPage({ settings, onOpenCard }: Props) {
   }, [settings.default_lat, settings.default_lon]);
 
   useEffect(() => {
+    let cancelled = false;
     const t = window.setTimeout(() => {
       void (async () => {
         if (!query.trim()) {
-          setHits([]);
-          setSearchPin(null);
-          setGeoError(null);
+          if (!cancelled) {
+            setHits([]);
+            setSearchPin(null);
+            setGeoError(null);
+          }
           return;
         }
         const q = query.trim().toLowerCase();
@@ -702,24 +756,29 @@ export function MapPage({ settings, onOpenCard }: Props) {
         }
 
         let infocardHits: SearchHit[] = [];
+        let infocardErr: string | null = null;
         if (wantServerCards && q.length >= 2) {
           try {
             const queries = infocardSearchQueries(query.trim(), null, settings.default_city);
             infocardHits = await searchInfocardHits(queries);
           } catch (err) {
-            setGeoError(
+            infocardErr =
               err instanceof Error
                 ? err.message
-                : "Не удалось искать карточки Infocard (проверьте вход в настройках)"
-            );
+                : "Не удалось искать карточки Infocard (проверьте вход в настройках)";
           }
         }
 
+        if (cancelled) return;
         setHits([...cardHits, ...infocardHits, ...waterHits].slice(0, 80));
         setActiveIndex(0);
+        if (infocardErr) setGeoError(infocardErr);
       })();
     }, 180);
-    return () => window.clearTimeout(t);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
   }, [
     query,
     settings.default_lat,
@@ -758,13 +817,78 @@ export function MapPage({ settings, onOpenCard }: Props) {
     [loadBounds]
   );
 
+  function prefetchHitLocation(hit: SearchHit) {
+    if (hit.lat != null && hit.lon != null) return;
+    const first =
+      hit.kind === "infocard"
+        ? infocardGeocodeCandidates(hit, settings.default_city)[0]
+        : hit.address || addressFromCardTitle(hit.title);
+    if (!first) return;
+    void geocodeAddress(first, settings.yandex_api_key, {
+      lat: settings.default_lat,
+      lon: settings.default_lon,
+      city: settings.default_city,
+      radiusKm: SEARCH_RADIUS_KM,
+    }).catch(() => {
+      /* prefetch */
+    });
+  }
+
   function moveTo(lat: number, lon: number, zoom = 15) {
     setFocusZoom(zoom);
     setCenter([lat, lon]);
+    setFocusNonce((n) => n + 1);
+  }
+
+  async function focusInfocardOnMap(hit: SearchHit) {
+    const gen = ++infocardFocusGen.current;
+    if (hit.lat != null && hit.lon != null) {
+      setSearchPin({ lat: hit.lat, lon: hit.lon, label: hit.title });
+      moveTo(hit.lat, hit.lon, ADDRESS_ZOOM);
+      if (serverWaterMode) {
+        setNearby(nearbyFromPoints(serverPointsAll, hit.lat, hit.lon, 8));
+      } else {
+        void api.nearby(hit.lat, hit.lon, 8, ALL_TYPES).then((rows) => {
+          if (gen === infocardFocusGen.current) setNearby(rows);
+        });
+      }
+      setGeoError(null);
+      return;
+    }
+    const candidates = infocardGeocodeCandidates(hit, settings.default_city);
+    let lastErr = "Адрес карточки не удалось показать на карте";
+    for (const addr of candidates) {
+      try {
+        const found = await geocodeAddress(addr, settings.yandex_api_key, {
+          lat: settings.default_lat,
+          lon: settings.default_lon,
+          city: settings.default_city,
+          radiusKm: SEARCH_RADIUS_KM,
+        });
+        if (gen !== infocardFocusGen.current) return;
+        setSearchPin({ ...found, label: hit.title });
+        moveTo(found.lat, found.lon, ADDRESS_ZOOM);
+        setGeoError(null);
+        if (serverWaterMode) {
+          setNearby(nearbyFromPoints(serverPointsAll, found.lat, found.lon, 8));
+        } else {
+          void api.nearby(found.lat, found.lon, 8, ALL_TYPES).then((rows) => {
+            if (gen === infocardFocusGen.current) setNearby(rows);
+          });
+        }
+        return;
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (gen !== infocardFocusGen.current) return;
+    setNearby([]);
+    setGeoError(`Карточка выбрана, но на карту не перешли: ${lastErr}`);
   }
 
   async function selectHit(hit: SearchHit, fallbackQuery?: string) {
     setSelected(hit);
+    setDetailDismissed(false);
     setGeoError(null);
     setMoveWaterId(null);
     setInfocardFiles([]);
@@ -773,8 +897,14 @@ export function MapPage({ settings, onOpenCard }: Props) {
     if (hit.kind === "infocard") {
       setWater(null);
       setFocusId(null);
-      setNearby([]);
       void loadInfocardCardFiles(hit);
+      void focusInfocardOnMap(hit);
+      try {
+        await api.addHistory(hit.kind, hit.id, hit.title);
+      } catch {
+        /* ignore */
+      }
+      void refreshLists();
       return;
     }
 
@@ -894,12 +1024,16 @@ export function MapPage({ settings, onOpenCard }: Props) {
       );
       setSearchPin(found);
       setFocusId(null);
+      setDetailDismissed(false);
       moveTo(found.lat, found.lon, ADDRESS_ZOOM);
-      const nearbyPoints = await api.nearby(found.lat, found.lon, 8, ALL_TYPES);
-      setNearby(nearbyPoints);
       setSelected(null);
       setWater(null);
       setSideMode("search");
+      setGeoBusy(false);
+
+      const nearbyPromise = serverWaterMode
+        ? Promise.resolve(nearbyFromPoints(serverPointsAll, found.lat, found.lon, 8))
+        : api.nearby(found.lat, found.lon, 8, ALL_TYPES);
 
       const geocodedParsed = parseAddressQuery(found.label);
       const compactParts = [
@@ -915,9 +1049,31 @@ export function MapPage({ settings, onOpenCard }: Props) {
       const wantLocalCards = cardsMode === "local" || cardsMode === "both";
       const wantServerCards = cardsMode === "server" || cardsMode === "both";
 
+      const localCardsPromise = wantLocalCards
+        ? Promise.all(searches.map((s) => api.search(s, ALL_TYPES, 80)))
+        : Promise.resolve([] as SearchHit[][]);
+      const infocardPromise = wantServerCards
+        ? searchInfocardHits(infocardSearchQueries(q, found.label, settings.default_city)).catch(
+            (err) => {
+              setGeoError(
+                err instanceof Error
+                  ? err.message
+                  : "Не удалось искать карточки Infocard (проверьте вход в настройках)"
+              );
+              return [] as SearchHit[];
+            }
+          )
+        : Promise.resolve([] as SearchHit[]);
+
+      const [nearbyPoints, batches, infocardHits] = await Promise.all([
+        nearbyPromise,
+        localCardsPromise,
+        infocardPromise,
+      ]);
+      setNearby(nearbyPoints);
+
       const cards: SearchHit[] = [];
       if (wantLocalCards) {
-        const batches = await Promise.all(searches.map((s) => api.search(s, ALL_TYPES, 80)));
         const cardMap = new Map<number, SearchHit>();
         for (const hit of batches.flat()) {
           if (hit.kind !== "card") continue;
@@ -937,20 +1093,6 @@ export function MapPage({ settings, onOpenCard }: Props) {
         cards.push(...cardMap.values());
       }
 
-      let infocardHits: SearchHit[] = [];
-      if (wantServerCards) {
-        try {
-          const queries = infocardSearchQueries(q, found.label, settings.default_city);
-          infocardHits = await searchInfocardHits(queries);
-        } catch (err) {
-          setGeoError(
-            err instanceof Error
-              ? err.message
-              : "Не удалось искать карточки Infocard (проверьте вход в настройках)"
-          );
-        }
-      }
-
       const waters = nearbyPoints.map(nearbyToSearchHit);
       setHits([...infocardHits, ...cards, ...waters].slice(0, 40));
       setActiveIndex(0);
@@ -959,7 +1101,6 @@ export function MapPage({ settings, onOpenCard }: Props) {
       setGeoError(e instanceof Error ? e.message : String(e));
       setHits([]);
       setNearby([]);
-    } finally {
       setGeoBusy(false);
     }
   }
@@ -1640,7 +1781,10 @@ export function MapPage({ settings, onOpenCard }: Props) {
                     : ""
                 }`}
                 onClick={() => void selectHit(hit, query)}
-                onMouseEnter={() => setActiveIndex(index)}
+                onMouseEnter={() => {
+                  setActiveIndex(index);
+                  prefetchHitLocation(hit);
+                }}
                 onDoubleClick={() => {
                   void selectHit(hit, query);
                   if (hit.kind === "card") onOpenCard(hit.id);
@@ -1729,6 +1873,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
             nativeMaxZoom={localPack?.max_zoom || 14}
             center={center}
             zoom={focusZoom || settings.default_zoom}
+            focusNonce={focusNonce}
             points={points}
             focusId={focusId}
             searchPin={searchPin}
@@ -1749,7 +1894,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
-            <FlyTo center={center} zoom={focusZoom} />
+            <FlyTo center={center} zoom={focusZoom} nonce={focusNonce} />
             <MapClickCatcher enabled={pickMode} onPick={(lat, lon) => void onMapPick(lat, lon)} />
             <BoundsLoader onBounds={onBoundsChangeDebounced} />
             <HouseNumbersLayer />
@@ -1782,7 +1927,16 @@ export function MapPage({ settings, onOpenCard }: Props) {
         )}
       </div>
 
-      <aside className="detail">
+      <aside className={`detail ${!detailDismissed && (selected || searchPin) ? "detail-open" : ""}`}>
+        {(selected || searchPin) && (
+          <button
+            type="button"
+            className="btn detail-close"
+            onClick={() => setDetailDismissed(true)}
+          >
+            Закрыть
+          </button>
+        )}
         {!selected && !searchPin && (
           <div className="empty">Выберите объект на карте или найдите адрес</div>
         )}

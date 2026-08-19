@@ -37,7 +37,7 @@ pub struct AppSettings {
     /// local | server — источник пользовательских меток на карте
     #[serde(default = "default_markers_mode")]
     pub markers_mode: String,
-    /// Радиус скачивания локальной карты, км (5–35)
+    /// Радиус скачивания локальной карты, км (5–80)
     #[serde(default = "default_map_radius_km")]
     pub map_radius_km: f64,
 }

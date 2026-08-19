@@ -1,3 +1,6 @@
+export const MAP_RADIUS_MIN_KM = 5;
+export const MAP_RADIUS_MAX_KM = 80;
+
 export type WaterType = "hydrant" | "pond" | "tower" | "pier" | "other";
 
 export type MapProviderId = "yandex" | "dgis" | "osm" | "local";
@@ -22,7 +25,7 @@ export interface AppSettings {
   cards_mode: string;
   /** local | server — водоисточники на карте */
   markers_mode: string;
-  /** Радиус скачивания локальной карты, км (5–35) */
+  /** Радиус скачивания локальной карты, км (5–80) */
   map_radius_km: number;
 }
 

@@ -56,6 +56,7 @@ export function WaterClusterLayer({
     const cluster = L.markerClusterGroup({
       maxClusterRadius: 48,
       spiderfyOnMaxZoom: true,
+      zoomToBoundsOnClick: false,
       showCoverageOnHover: false,
       disableClusteringAtZoom: 18,
       chunkedLoading: true,

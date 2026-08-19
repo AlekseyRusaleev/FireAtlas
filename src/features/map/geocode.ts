@@ -272,9 +272,41 @@ function uniqueLabels(items: string[]): AddressSuggestion[] {
   return out;
 }
 
+const GEOCODE_CACHE_LIMIT = 120;
+const geocodeCache = new Map<string, GeocodeResult>();
+const geocodeInflight = new Map<string, Promise<GeocodeResult>>();
+
+function geocodeCacheKey(query: string, bias?: GeocodeBias): string {
+  const city = (bias?.city || "").trim().toLowerCase();
+  const lat = bias ? bias.lat.toFixed(3) : "";
+  const lon = bias ? bias.lon.toFixed(3) : "";
+  return `${query.trim().toLowerCase()}|${city}|${lat}|${lon}`;
+}
+
+function rememberGeocode(key: string, result: GeocodeResult): GeocodeResult {
+  geocodeCache.delete(key);
+  geocodeCache.set(key, result);
+  while (geocodeCache.size > GEOCODE_CACHE_LIMIT) {
+    const oldest = geocodeCache.keys().next().value;
+    if (oldest == null) break;
+    geocodeCache.delete(oldest);
+  }
+  return result;
+}
+
+async function gather<T>(jobs: Array<Promise<T[]>>, errors: string[]): Promise<T[]> {
+  const settled = await Promise.allSettled(jobs);
+  const out: T[] = [];
+  for (const item of settled) {
+    if (item.status === "fulfilled") out.push(...item.value);
+    else errors.push(item.reason instanceof Error ? item.reason.message : String(item.reason));
+  }
+  return out;
+}
+
 /**
- * Ищет адрес в радиусе города: свой Nominatim → Яндекс (если есть) → Photon / публичный Nominatim.
- * Кандидаты ранжируются по улице и номеру дома — не берём «ближайший наугад».
+ * Ищет адрес в радиусе города: свой Nominatim, при неудаче — Яндекс / Photon / публичный OSM.
+ * Как только есть точное совпадение по улице и дому — сразу возвращаем, без ожидания запасных сервисов.
  */
 export async function geocodeAddress(
   query: string,
@@ -283,7 +315,26 @@ export async function geocodeAddress(
 ): Promise<GeocodeResult> {
   const q = query.trim();
   if (!q) throw new Error("Введите адрес для поиска");
+  const key = geocodeCacheKey(q, bias);
+  const cached = geocodeCache.get(key);
+  if (cached) return cached;
+  const pending = geocodeInflight.get(key);
+  if (pending) return pending;
 
+  const work = geocodeAddressUncached(q, apiKey, bias)
+    .then((result) => rememberGeocode(key, result))
+    .finally(() => {
+      geocodeInflight.delete(key);
+    });
+  geocodeInflight.set(key, work);
+  return work;
+}
+
+async function geocodeAddressUncached(
+  q: string,
+  apiKey: string,
+  bias?: GeocodeBias
+): Promise<GeocodeResult> {
   const radiusKm = bias?.radiusKm ?? DEFAULT_RADIUS_KM;
   const city = bias?.city?.trim();
   const biasedQuery =
@@ -301,65 +352,56 @@ export async function geocodeAddress(
   const errors: string[] = [];
   const pool: RankedCandidate[] = [];
 
-  for (const candidate of uniqueQueries) {
-    try {
-      const viaOwn = await geocodeViaNominatim(
-        candidate,
-        bias,
-        radiusKm,
-        city,
-        parsed,
-        OWN_NOMINATIM_BASE
-      );
-      pool.push(...viaOwn);
-    } catch (e) {
-      errors.push(e instanceof Error ? e.message : String(e));
-    }
+  const take = (extra: RankedCandidate[]) => {
+    pool.push(...extra);
+    return pickBest(pool, parsed, bias, radiusKm);
+  };
+
+  const own = await gather(
+    uniqueQueries.map((candidate) =>
+      geocodeViaNominatim(candidate, bias, radiusKm, city, parsed, OWN_NOMINATIM_BASE)
+    ),
+    errors
+  );
+  let best = take(own);
+  if (best) {
+    assertWithinRadius(best, bias, radiusKm);
+    return best;
   }
 
-  for (const candidate of uniqueQueries) {
-    const viaJsApi = await geocodeViaJsApi(candidate, bias, radiusKm);
-    if (viaJsApi) pool.push(...viaJsApi);
-  }
-
+  const yandex: Array<Promise<RankedCandidate[]>> = uniqueQueries.map((candidate) =>
+    geocodeViaJsApi(candidate, bias, radiusKm)
+  );
   if (apiKey.trim()) {
     for (const candidate of uniqueQueries) {
-      try {
-        const viaHttp = await geocodeViaHttp(candidate, apiKey, bias, radiusKm);
-        pool.push(...viaHttp);
-      } catch (e) {
-        errors.push(e instanceof Error ? e.message : String(e));
-      }
+      yandex.push(geocodeViaHttp(candidate, apiKey, bias, radiusKm));
     }
   }
-
-  // Fallback, если своего индекса мало (вне области покрытия)
-  for (const candidate of uniqueQueries) {
-    try {
-      const viaPhoton = await geocodeViaPhoton(candidate, bias, radiusKm);
-      pool.push(...viaPhoton);
-    } catch (e) {
-      errors.push(e instanceof Error ? e.message : String(e));
-    }
+  best = take(await gather(yandex, errors));
+  if (best) {
+    assertWithinRadius(best, bias, radiusKm);
+    return best;
   }
 
-  for (const candidate of uniqueQueries) {
-    try {
-      const viaNominatim = await geocodeViaNominatim(
-        candidate,
-        bias,
-        radiusKm,
-        city,
-        parsed,
-        "https://nominatim.openstreetmap.org"
-      );
-      pool.push(...viaNominatim);
-    } catch (e) {
-      errors.push(e instanceof Error ? e.message : String(e));
-    }
+  best = take(
+    await gather(
+      uniqueQueries.map((candidate) => geocodeViaPhoton(candidate, bias, radiusKm)),
+      errors
+    )
+  );
+  if (best) {
+    assertWithinRadius(best, bias, radiusKm);
+    return best;
   }
 
-  const best = pickBest(pool, parsed, bias, radiusKm);
+  best = take(
+    await gather(
+      uniqueQueries.map((candidate) =>
+        geocodeViaNominatim(candidate, bias, radiusKm, city, parsed, "https://nominatim.openstreetmap.org")
+      ),
+      errors
+    )
+  );
   if (best) {
     assertWithinRadius(best, bias, radiusKm);
     return best;
@@ -651,8 +693,7 @@ async function geocodeViaNominatim(
   }
   urls.push(`${base}&q=${encodeURIComponent(q)}`);
 
-  const out: RankedCandidate[] = [];
-  for (const url0 of urls) {
+  const jobs = urls.map(async (url0) => {
     let url = url0;
     if (bias) {
       const b = boundsAround(bias.lat, bias.lon, radiusKm);
@@ -663,7 +704,8 @@ async function geocodeViaNominatim(
     });
     if (!res.ok) throw new Error(`Nominatim: HTTP ${res.status}`);
     const items: any[] = await res.json();
-    if (!Array.isArray(items)) continue;
+    if (!Array.isArray(items)) return [] as RankedCandidate[];
+    const local: RankedCandidate[] = [];
     for (const item of items) {
       const lat = Number(item.lat);
       const lon = Number(item.lon);
@@ -671,7 +713,7 @@ async function geocodeViaNominatim(
       const km = bias ? distanceKm(bias.lat, bias.lon, lat, lon) : 0;
       if (bias && km > radiusKm * 1.15) continue;
       const addr = item.address || {};
-      out.push({
+      local.push({
         lat,
         lon,
         label: String(item.display_name || q),
@@ -681,6 +723,15 @@ async function geocodeViaNominatim(
         street: addr.road || addr.pedestrian || addr.residential || null,
       });
     }
+    return local;
+  });
+  const settled = await Promise.allSettled(jobs);
+  const out: RankedCandidate[] = [];
+  let lastErr: string | null = null;
+  for (const item of settled) {
+    if (item.status === "fulfilled") out.push(...item.value);
+    else lastErr = item.reason instanceof Error ? item.reason.message : String(item.reason);
   }
+  if (out.length === 0 && lastErr) throw new Error(lastErr);
   return out;
 }

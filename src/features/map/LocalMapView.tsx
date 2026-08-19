@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { MapContainer, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -34,6 +34,19 @@ function LocalTiles({
         return convertFileSrc(tilePath);
       },
     });
+    // Сначала интернет: за границей скачанного круга и при сильном зуме не будет чёрной дыры.
+    const online = L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_labels_under/{z}/{x}/{y}.png",
+      {
+        subdomains: "abcd",
+        minZoom: 1,
+        maxZoom: 20,
+        maxNativeZoom: 20,
+        attribution: "&copy; OpenStreetMap, &copy; Carto",
+      }
+    );
+    online.addTo(map);
+
     const local = new (Layer as unknown as typeof L.TileLayer)("", {
       minZoom: 1,
       maxZoom: 22,
@@ -45,20 +58,6 @@ function LocalTiles({
     });
     local.addTo(map);
 
-    // При сильном приближении подтягиваем онлайн-тайлы с крупными подписями (если есть сеть).
-    const online = L.tileLayer(
-      "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_labels_under/{z}/{x}/{y}.png",
-      {
-        subdomains: "abcd",
-        minZoom: nativeMaxZoom + 1,
-        maxZoom: 20,
-        maxNativeZoom: 20,
-        attribution: "&copy; OpenStreetMap, &copy; Carto",
-        opacity: 1,
-      }
-    );
-    online.addTo(map);
-
     return () => {
       map.removeLayer(local);
       map.removeLayer(online);
@@ -67,13 +66,26 @@ function LocalTiles({
   return null;
 }
 
-function FlyTo({ center, zoom }: { center: [number, number]; zoom: number }) {
+function FlyTo({
+  center,
+  zoom,
+  nonce = 0,
+}: {
+  center: [number, number];
+  zoom: number;
+  nonce?: number;
+}) {
   const map = useMap();
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
   useEffect(() => {
-    // invalidateSize помогает, если панель только что обновилась
+    // Не принудительно ставить default_zoom: иначе клик по ИППВ отъезжает с 17 на 12–15.
     map.invalidateSize();
-    map.setView(center, zoom, { animate: true });
-  }, [center[0], center[1], zoom, map]);
+    map.setView(center, Math.max(map.getZoom(), zoomRef.current), {
+      animate: true,
+      duration: 0.2,
+    });
+  }, [center[0], center[1], nonce, map]);
   return null;
 }
 
@@ -225,6 +237,7 @@ interface Props {
   nativeMaxZoom?: number;
   center: [number, number];
   zoom: number;
+  focusNonce?: number;
   points: WaterPoint[];
   focusId: number | null;
   searchPin?: SearchPin | null;
@@ -241,6 +254,7 @@ export function LocalMapView({
   nativeMaxZoom = 14,
   center,
   zoom,
+  focusNonce = 0,
   points,
   focusId,
   searchPin = null,
@@ -279,7 +293,11 @@ export function LocalMapView({
         nativeMinZoom={nativeMinZoom}
         nativeMaxZoom={nativeMaxZoom}
       />
-      <FlyTo center={center} zoom={Math.min(Math.max(zoom, viewMin), viewMax)} />
+      <FlyTo
+        center={center}
+        zoom={Math.min(Math.max(zoom, viewMin), viewMax)}
+        nonce={focusNonce}
+      />
       <BoundsWatcher onBounds={onBoundsChange} />
       <MapClickCatcher
         enabled={pickMode}

@@ -39,6 +39,19 @@ pub struct MapPackageMeta {
     pub radius_km: f64,
 }
 
+pub const MAP_RADIUS_MIN_KM: f64 = 5.0;
+pub const MAP_RADIUS_MAX_KM: f64 = 80.0;
+const TILE_BUDGET: u32 = 8000;
+const PACK_ZMIN: u32 = 12;
+const PACK_ZMAX_PREF: u32 = 15;
+
+pub fn clamp_map_radius(km: f64) -> f64 {
+    if !km.is_finite() {
+        return 16.0;
+    }
+    km.clamp(MAP_RADIUS_MIN_KM, MAP_RADIUS_MAX_KM)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapPackageInfo {
     pub id: String,
@@ -179,7 +192,7 @@ pub fn resolve_city_query(query: &str, radius_km: Option<f64>) -> Result<MapCity
     if q.is_empty() {
         return Err("Введите название города".into());
     }
-    let r = radius_km.unwrap_or(16.0).clamp(5.0, 35.0);
+    let r = clamp_map_radius(radius_km.unwrap_or(16.0));
 
     if let Some(mut c) = find_city(q) {
         c.radius_km = r;
@@ -256,6 +269,31 @@ fn lat_to_y(lat: f64, z: u32) -> u32 {
     y.floor().clamp(0.0, n - 1.0) as u32
 }
 
+fn fit_offline_tiles(
+    south: f64,
+    west: f64,
+    north: f64,
+    east: f64,
+) -> Result<(u32, u32, Vec<(u32, u32, u32)>), String> {
+    let mut zmax = PACK_ZMAX_PREF;
+    loop {
+        let tiles = collect_tiles(south, west, north, east, PACK_ZMIN, zmax);
+        let total = tiles.len() as u32;
+        if total == 0 {
+            return Err("Нет тайлов для выбранной области".into());
+        }
+        if total <= TILE_BUDGET {
+            return Ok((PACK_ZMIN, zmax, tiles));
+        }
+        if zmax <= PACK_ZMIN {
+            return Err(format!(
+                "Слишком много тайлов ({total}) даже без детального зума. Уменьшите радиус."
+            ));
+        }
+        zmax -= 1;
+    }
+}
+
 fn collect_tiles(south: f64, west: f64, north: f64, east: f64, zmin: u32, zmax: u32) -> Vec<(u32, u32, u32)> {
     let mut out = Vec::new();
     for z in zmin..=zmax {
@@ -305,7 +343,7 @@ pub fn list_packages(data_path: &Path) -> Result<Vec<MapPackageInfo>, String> {
                     meta.radius_km
                 } else {
                     // Старые пакеты: оценка по широте bbox
-                    ((meta.north - meta.south) * 111.0 / 2.0).clamp(5.0, 35.0)
+                    clamp_map_radius((meta.north - meta.south) * 111.0 / 2.0)
                 },
             }),
             Err(_) => {
@@ -426,20 +464,9 @@ pub fn prepare_package(
     );
     let city = resolve_city_query(&city_query, radius_km)?;
     let (south, west, north, east) = bbox(city.lat, city.lon, city.radius_km);
-    // z12–15: улицы видны; при зуме выше Leaflet увеличивает z15
-    let zmin = 12;
-    let zmax = 15;
-    let tiles = collect_tiles(south, west, north, east, zmin, zmax);
+    // Большой город: тот же бюджет тайлов, но ниже max zoom. Улицы тогда из интернета.
+    let (zmin, zmax, tiles) = fit_offline_tiles(south, west, north, east)?;
     let total = tiles.len() as u32;
-    if total == 0 {
-        return Err("Нет тайлов для выбранной области".into());
-    }
-    if total > 8000 {
-        return Err(format!(
-            "Слишком много тайлов ({total}). Уменьшите радиус (сейчас {:.0} км).",
-            city.radius_km
-        ));
-    }
 
     // Store on LOCAL disk (AppData), never on Yandex Disk / cloud data_path — otherwise writes hang.
     let dir = package_dir(&maps_parent, &city.id);
@@ -451,7 +478,8 @@ pub fn prepare_package(
             current: 0,
             total,
             message: format!(
-                "Город найден. Сохранение на локальный диск… ({})",
+                "Город найден, радиус {:.0} км, офлайн-зумы {zmin}–{zmax}. Сохранение… ({})",
+                city.radius_km,
                 dir.display()
             ),
             done: false,
@@ -791,7 +819,7 @@ pub fn import_package_zip(data_path: &Path, zip_path: &Path) -> Result<MapPackag
         radius_km: if meta.radius_km > 0.0 {
             meta.radius_km
         } else {
-            ((meta.north - meta.south) * 111.0 / 2.0).clamp(5.0, 35.0)
+            clamp_map_radius((meta.north - meta.south) * 111.0 / 2.0)
         },
     })
 }

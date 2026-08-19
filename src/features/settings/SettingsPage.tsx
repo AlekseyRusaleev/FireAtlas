@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import * as api from "../../shared/api";
 import {
   CITIES,
+  MAP_RADIUS_MAX_KM,
+  MAP_RADIUS_MIN_KM,
   type AppSettings,
   type IndexStats,
   type MapPackageInfo,
@@ -38,7 +40,10 @@ function normalize(form: AppSettings): AppSettings {
     markers_mode: ["local", "server"].includes(form.markers_mode)
       ? form.markers_mode
       : "local",
-    map_radius_km: Math.min(35, Math.max(5, Number(form.map_radius_km) || 16)),
+    map_radius_km: Math.min(
+      MAP_RADIUS_MAX_KM,
+      Math.max(MAP_RADIUS_MIN_KM, Number(form.map_radius_km) || 16)
+    ),
   };
 }
 
@@ -153,7 +158,10 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
   const [packages, setPackages] = useState<MapPackageInfo[]>([]);
   const [packCityName, setPackCityName] = useState(settings.default_city || "");
   const [packRadiusKm, setPackRadiusKm] = useState(
-    Math.min(35, Math.max(5, Math.round(settings.map_radius_km || 16)))
+    Math.min(
+      MAP_RADIUS_MAX_KM,
+      Math.max(MAP_RADIUS_MIN_KM, Math.round(settings.map_radius_km || 16))
+    )
   );
   const [packProgress, setPackProgress] = useState<MapPackProgress | null>(null);
   const [packDownloading, setPackDownloading] = useState(false);
@@ -184,7 +192,12 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
     });
     setCityQuery(settings.default_city || "");
     if (!packDownloading) {
-      setPackRadiusKm(Math.min(35, Math.max(5, Math.round(settings.map_radius_km || 16))));
+      setPackRadiusKm(
+        Math.min(
+          MAP_RADIUS_MAX_KM,
+          Math.max(MAP_RADIUS_MIN_KM, Math.round(settings.map_radius_km || 16))
+        )
+      );
       if (settings.default_city) {
         setPackCityName(settings.default_city);
       }
@@ -475,7 +488,10 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
       error: null,
     });
     try {
-      const radius = Math.min(35, Math.max(5, Math.round(packRadiusKm) || 16));
+      const radius = Math.min(
+        MAP_RADIUS_MAX_KM,
+        Math.max(MAP_RADIUS_MIN_KM, Math.round(packRadiusKm) || 16)
+      );
       setPackRadiusKm(radius);
       // Сохраняем радиус в настройки сразу — поле больше не «забывает» значение.
       const next = normalize({ ...form, map_radius_km: radius });
@@ -744,9 +760,9 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
         <div className="field">
           <label>Скачать карту города (локальные тайлы)</label>
           <div className="muted" style={{ marginBottom: 8, fontSize: 13 }}>
-            Радиус покрытия тайлов (5–35 км) сохраняется в настройках. Для района выезда обычно
-            нужно 25–35 км; при слишком большом радиусе скачивание может отклониться из‑за лимита
-            тайлов.
+            Радиус покрытия (5–80 км) зависит от города: небольшой район — 15–25 км, Кемерово и
+            крупные выезды — 50–80 км. Если тайлов слишком много, детальный зум не качается —
+            улицы тогда подтянутся из интернета. За границей скачанного круга тоже будет онлайн-карта.
           </div>
           <div className="row">
             <input
@@ -762,14 +778,17 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
             />
             <input
               type="number"
-              min={5}
-              max={35}
+              min={MAP_RADIUS_MIN_KM}
+              max={MAP_RADIUS_MAX_KM}
               step={1}
               value={packRadiusKm}
               title="Радиус покрытия карты, км (сохраняется)"
               style={{ maxWidth: 90 }}
               onChange={(e) => {
-                const v = Math.min(35, Math.max(5, Number(e.target.value) || 16));
+                const v = Math.min(
+                  MAP_RADIUS_MAX_KM,
+                  Math.max(MAP_RADIUS_MIN_KM, Number(e.target.value) || 16)
+                );
                 setPackRadiusKm(v);
                 setForm({ ...form, map_radius_km: v });
               }}

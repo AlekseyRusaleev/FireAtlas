@@ -1,0 +1,13 @@
+{
+  "version": "0.1.33",
+  "notes": "Обновление больше не создаёт лишние ярлыки на рабочем столе.",
+  "publishedAt": "2026-08-18",
+  "installer": {
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-Setup.exe",
+    "sha256": "1d38ffa2e231dd0f5f265d564f45a56b15ba1e7ab93ca5dc5aece6706672f8fd"
+  },
+  "portable": {
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.33-portable.zip",
+    "sha256": "a38016e5e823a675427b55a70d9bfa636418969dc6e0142249057c58ecc77747"
+  }
+}

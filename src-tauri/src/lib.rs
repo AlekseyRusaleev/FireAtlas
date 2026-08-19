@@ -876,7 +876,7 @@ fn prepare_map_package(
                 settings.default_lon = info.lon;
                 settings.default_zoom = info.zoom;
                 if info.radius_km > 0.0 {
-                    settings.map_radius_km = info.radius_km.clamp(5.0, 35.0);
+                    settings.map_radius_km = local_map::clamp_map_radius(info.radius_km);
                 }
                 let _ = state2.store.save(&settings);
                 *state2.settings.lock() = settings;
@@ -1040,7 +1040,7 @@ fn pick_map_package_folder(
         radius_km: if meta.radius_km > 0.0 {
             meta.radius_km
         } else {
-            ((meta.north - meta.south) * 111.0 / 2.0).clamp(5.0, 35.0)
+            local_map::clamp_map_radius((meta.north - meta.south) * 111.0 / 2.0)
         },
     };
     let mut settings = state.settings.lock().clone();
@@ -1052,7 +1052,7 @@ fn pick_map_package_folder(
     settings.default_lon = info.lon;
     settings.default_zoom = info.zoom;
     if info.radius_km > 0.0 {
-        settings.map_radius_km = info.radius_km.clamp(5.0, 35.0);
+        settings.map_radius_km = local_map::clamp_map_radius(info.radius_km);
     }
     state.store.save(&settings)?;
     *state.settings.lock() = settings;
@@ -1100,6 +1100,7 @@ pub fn run() {
                 map_pack_running: AtomicBool::new(false),
             });
             app.manage(state);
+            updater::cleanup_spurious_shortcuts();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

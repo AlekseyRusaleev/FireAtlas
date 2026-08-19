@@ -153,12 +153,12 @@ export default function App() {
       {error && <div className="status-banner">{error}</div>}
 
       {updateOffer && !updateDismissed && (
-        <div className="update-banner">
-          <div className="update-banner-text">
+        <div className="update-toast" role="status">
+          <div className="update-toast-text">
             Доступна {updateOffer.version}
-            {updateError ? <span className="error-text"> · {updateError}</span> : null}
+            {updateError ? <span className="error-text">{updateError}</span> : null}
           </div>
-          <div className="update-banner-actions">
+          <div className="update-toast-actions">
             <button
               type="button"
               className="btn primary"

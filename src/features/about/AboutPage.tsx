@@ -63,6 +63,17 @@ export function AboutPage() {
         <p>
           email: <a href="mailto:leshqa90@yandex.ru">leshqa90@yandex.ru</a>
         </p>
+        <p className="muted">
+          Новым компьютерам ставьте установщик, не копируйте рабочую папку:
+          <br />
+          <a
+            href="https://geo.infocardmchs.ru/updates/FireAtlas-Setup.exe"
+            target="_blank"
+            rel="noreferrer"
+          >
+            https://geo.infocardmchs.ru/updates/FireAtlas-Setup.exe
+          </a>
+        </p>
 
         <div className="about-update">
           <button type="button" className="btn" disabled={busy || applying} onClick={() => void check()}>

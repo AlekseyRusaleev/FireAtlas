@@ -271,6 +271,7 @@ export interface UpdateManifest {
   notes: string;
   publishedAt: string;
   portable: PortableArtifact;
+  installer?: PortableArtifact;
 }
 
 export interface UpdateCheckResult {
