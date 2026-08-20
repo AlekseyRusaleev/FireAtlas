@@ -748,7 +748,7 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
             <div className="muted">
               Сейчас: <strong>{form.default_city}</strong> ({form.default_lat.toFixed(4)},{" "}
               {form.default_lon.toFixed(4)}). Поиск адресов на карте — в радиусе{" "}
-              <strong>50 км</strong> вокруг этого города (отдельно от скачивания тайлов).
+              <strong>50 км</strong> вокруг этого города.
             </div>
           ) : (
             <div className="muted">
@@ -758,11 +758,10 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
         </div>
 
         <div className="field">
-          <label>Скачать карту города (локальные тайлы)</label>
+          <label>Скачать карту города (необязательно)</label>
           <div className="muted" style={{ marginBottom: 8, fontSize: 13 }}>
-            Радиус покрытия (5–80 км) зависит от города: небольшой район — 15–25 км, Кемерово и
-            крупные выезды — 50–80 км. Если тайлов слишком много, детальный зум не качается —
-            улицы тогда подтянутся из интернета. За границей скачанного круга тоже будет онлайн-карта.
+            Живая карта — векторная MapLibre из интернета. PNG-пакет больше не нужен, чтобы видеть
+            улицы и номера домов.
           </div>
           <div className="row">
             <input
@@ -864,8 +863,9 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
                 : ""}
             </div>
           ) : (
-            <div className="status-banner warn">
-              Карта ещё не скачана. Введите город и нажмите «Скачать».
+            <div className="status-banner">
+              Карта векторная (MapLibre). Скачивать PNG-пакет не обязательно — подложка идёт из
+              интернета.
             </div>
           )}
           {packages.length > 0 && (

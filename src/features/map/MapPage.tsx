@@ -1,16 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { MapContainer, TileLayer, Marker, Popup, useMap, useMapEvents } from "react-leaflet";
-import L from "leaflet";
-import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
-import markerIcon from "leaflet/dist/images/marker-icon.png";
-import markerShadow from "leaflet/dist/images/marker-shadow.png";
-import "leaflet/dist/leaflet.css";
 import * as api from "../../shared/api";
 import { hasReadableText, sanitizeDescription } from "../../shared/html";
 import {
   WATER_TYPE_SHORT,
   type AppSettings,
-  type MapPackageInfo,
   type MarkerFileInfo,
   type MarkersState,
   type NearbyPoint,
@@ -20,8 +13,6 @@ import {
   type WaterType,
 } from "../../shared/types";
 import { LocalMapView } from "./LocalMapView";
-import { HouseNumbersLayer } from "./HouseNumbersLayer";
-import { WaterClusterLayer } from "./WaterClusterLayer";
 import type { SearchPin } from "./YandexMapView";
 import { PdfViewer } from "../../shared/PdfViewer";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -34,12 +25,6 @@ import {
   STREET_STOP,
   type AddressSuggestion,
 } from "./geocode";
-
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: markerIcon2x,
-  iconUrl: markerIcon,
-  shadowUrl: markerShadow,
-});
 
 const ALL_TYPES: WaterType[] = ["hydrant", "pond", "tower", "pier", "other"];
 const ADDRESS_ZOOM = 17;
@@ -410,85 +395,6 @@ function addressFromSubtitle(subtitle: string): string | null {
   return null;
 }
 
-function dotIcon(color: string, size: number, ring = false) {
-  return L.divIcon({
-    className: "",
-    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:${
-      ring ? `0 0 0 6px ${color}55,` : ""
-    }0 1px 4px rgba(0,0,0,.5)"></div>`,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-  });
-}
-
-const SEARCH_PIN_ICON = dotIcon("#ffcc00", 18, true);
-const USER_MARKER_ICON = dotIcon("#9b59b6", 16);
-
-function FlyTo({
-  center,
-  zoom,
-  nonce = 0,
-}: {
-  center: [number, number];
-  zoom: number;
-  nonce?: number;
-}) {
-  const map = useMap();
-  const zoomRef = useRef(zoom);
-  zoomRef.current = zoom;
-  useEffect(() => {
-    map.flyTo(center, Math.max(map.getZoom(), zoomRef.current), { duration: 0.22 });
-  }, [center[0], center[1], nonce, map]);
-  return null;
-}
-
-function MapClickCatcher({
-  enabled,
-  onPick,
-}: {
-  enabled: boolean;
-  onPick: (lat: number, lon: number) => void;
-}) {
-  useMapEvents({
-    click: (e) => {
-      if (enabled) onPick(e.latlng.lat, e.latlng.lng);
-    },
-  });
-  return null;
-}
-
-function BoundsLoader({
-  onBounds,
-}: {
-  onBounds: (b: { south: number; west: number; north: number; east: number }) => void;
-}) {
-  const map = useMapEvents({
-    moveend: () => {
-      notify();
-    },
-    zoomend: () => {
-      notify();
-    },
-  });
-
-  function notify() {
-    const b = map.getBounds();
-    onBounds({
-      south: b.getSouth(),
-      west: b.getWest(),
-      north: b.getNorth(),
-      east: b.getEast(),
-    });
-  }
-
-  useEffect(() => {
-    notify();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  return null;
-}
-
 function NearbySection({
   nearby,
   onSelect,
@@ -552,7 +458,6 @@ export function MapPage({ settings, onOpenCard }: Props) {
   const [detailDismissed, setDetailDismissed] = useState(false);
   const infocardFocusGen = useRef(0);
   const [focusId, setFocusId] = useState<number | null>(null);
-  const [localPack, setLocalPack] = useState<MapPackageInfo | null>(null);
   const [history, setHistory] = useState<SearchHit[]>([]);
   const [favorites, setFavorites] = useState<SearchHit[]>([]);
   const [sideMode, setSideMode] = useState<SideMode>("search");
@@ -582,7 +487,6 @@ export function MapPage({ settings, onOpenCard }: Props) {
   );
   const draftNameRef = useRef<HTMLInputElement>(null);
 
-  const useLocalMap = Boolean(settings.local_map_path);
   const sideList =
     sideMode === "search" ? hits : sideMode === "history" ? history : sideMode === "favorites" ? favorites : [];
   const description = useMemo(() => {
@@ -638,26 +542,6 @@ export function MapPage({ settings, onOpenCard }: Props) {
   useEffect(() => {
     void refreshLists();
   }, []);
-
-  useEffect(() => {
-    if (!useLocalMap || !settings.local_map_path) {
-      setLocalPack(null);
-      return;
-    }
-    void (async () => {
-      try {
-        const packs = await api.listMapPackages();
-        const match =
-          packs.find((p) => p.path === settings.local_map_path) ||
-          packs.find((p) => p.id === settings.local_map_city_id) ||
-          packs.find((p) => p.ready) ||
-          null;
-        setLocalPack(match);
-      } catch {
-        setLocalPack(null);
-      }
-    })();
-  }, [useLocalMap, settings.local_map_path, settings.local_map_city_id]);
 
   useEffect(() => {
     void (async () => {
@@ -1866,65 +1750,19 @@ export function MapPage({ settings, onOpenCard }: Props) {
           )}
         </div>
 
-        {useLocalMap ? (
-          <LocalMapView
-            packagePath={settings.local_map_path}
-            nativeMinZoom={localPack?.min_zoom || 12}
-            nativeMaxZoom={localPack?.max_zoom || 14}
-            center={center}
-            zoom={focusZoom || settings.default_zoom}
-            focusNonce={focusNonce}
-            points={points}
-            focusId={focusId}
-            searchPin={searchPin}
-            markers={markers}
-            pickMode={pickMode}
-            onPick={(lat, lon) => void onMapPick(lat, lon)}
-            onBoundsChange={onBoundsChangeDebounced}
-            onPointClick={onPointClick}
-          />
-        ) : (
-          <MapContainer
-            center={[settings.default_lat || 55.75, settings.default_lon || 37.62]}
-            zoom={settings.default_zoom}
-            zoomControl
-            style={{ width: "100%", height: "100%" }}
-          >
-            <TileLayer
-              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            />
-            <FlyTo center={center} zoom={focusZoom} nonce={focusNonce} />
-            <MapClickCatcher enabled={pickMode} onPick={(lat, lon) => void onMapPick(lat, lon)} />
-            <BoundsLoader onBounds={onBoundsChangeDebounced} />
-            <HouseNumbersLayer />
-            <WaterClusterLayer
-              points={points}
-              focusId={focusId}
-              pickMode={pickMode}
-              onPointClick={onPointClick}
-              onPick={(lat, lon) => void onMapPick(lat, lon)}
-            />
-            {markers.map((m) => (
-              <Marker key={`um-${m.id}`} position={[m.lat, m.lon]} icon={USER_MARKER_ICON}>
-                <Popup>
-                  <strong>{m.name}</strong>
-                  {m.comment ? (
-                    <>
-                      <br />
-                      {m.comment}
-                    </>
-                  ) : null}
-                </Popup>
-              </Marker>
-            ))}
-            {searchPin && (
-              <Marker position={[searchPin.lat, searchPin.lon]} icon={SEARCH_PIN_ICON}>
-                <Popup>{searchPin.label}</Popup>
-              </Marker>
-            )}
-          </MapContainer>
-        )}
+        <LocalMapView
+          center={center}
+          zoom={focusZoom || settings.default_zoom}
+          focusNonce={focusNonce}
+          points={points}
+          focusId={focusId}
+          searchPin={searchPin}
+          markers={markers}
+          pickMode={pickMode}
+          onPick={(lat, lon) => void onMapPick(lat, lon)}
+          onBoundsChange={onBoundsChangeDebounced}
+          onPointClick={onPointClick}
+        />
       </div>
 
       <aside className={`detail ${!detailDismissed && (selected || searchPin) ? "detail-open" : ""}`}>

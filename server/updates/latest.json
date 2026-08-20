@@ -1,13 +1,13 @@
 {
-  "version": "0.1.33",
-  "notes": "Обновление больше не создаёт лишние ярлыки на рабочем столе.",
-  "publishedAt": "2026-08-18",
+  "version": "0.1.35",
+  "notes": "Карта OSM/OpenFreeMap снова рисуется. Крупные номера домов с зума 13.",
+  "publishedAt": "2026-08-20",
   "installer": {
     "url": "https://geo.infocardmchs.ru/updates/FireAtlas-Setup.exe",
-    "sha256": "1d38ffa2e231dd0f5f265d564f45a56b15ba1e7ab93ca5dc5aece6706672f8fd"
+    "sha256": "f65acc48ddfddde8223d1357afbc63cfa9c0a0b9fdee1ca6bcdf88ddad28cc5e"
   },
   "portable": {
-    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.33-portable.zip",
-    "sha256": "a38016e5e823a675427b55a70d9bfa636418969dc6e0142249057c58ecc77747"
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.35-portable.zip",
+    "sha256": "ddbce2d302220aca52921095e04f4ddcc061881a8c66a63e816554892620f596"
   }
 }

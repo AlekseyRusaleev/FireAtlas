@@ -1,12 +1,15 @@
 import { useEffect, useRef } from "react";
 import { MapContainer, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import "leaflet/dist/leaflet.css";
 import type { WaterPoint } from "../../shared/types";
 import type { SearchPin } from "./YandexMapView";
 import { HouseNumbersLayer } from "./HouseNumbersLayer";
 import { WaterClusterLayer } from "./WaterClusterLayer";
+import { MapLibreBasemap } from "./MapLibreBasemap";
+
+const VIEW_MIN_ZOOM = 4;
+const VIEW_MAX_ZOOM = 20;
 
 const SEARCH_PIN_ICON = L.divIcon({
   className: "",
@@ -14,57 +17,6 @@ const SEARCH_PIN_ICON = L.divIcon({
   iconSize: [22, 22],
   iconAnchor: [11, 11],
 });
-
-function LocalTiles({
-  packagePath,
-  nativeMinZoom,
-  nativeMaxZoom,
-}: {
-  packagePath: string;
-  nativeMinZoom: number;
-  nativeMaxZoom: number;
-}) {
-  const map = useMap();
-  useEffect(() => {
-    const root = packagePath.replace(/[/\\]+$/, "");
-    const sep = root.includes("\\") ? "\\" : "/";
-    const Layer = L.TileLayer.extend({
-      getTileUrl(coords: L.Coords) {
-        const tilePath = `${root}${sep}${coords.z}${sep}${coords.x}${sep}${coords.y}.png`;
-        return convertFileSrc(tilePath);
-      },
-    });
-    // Сначала интернет: за границей скачанного круга и при сильном зуме не будет чёрной дыры.
-    const online = L.tileLayer(
-      "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_labels_under/{z}/{x}/{y}.png",
-      {
-        subdomains: "abcd",
-        minZoom: 1,
-        maxZoom: 20,
-        maxNativeZoom: 20,
-        attribution: "&copy; OpenStreetMap, &copy; Carto",
-      }
-    );
-    online.addTo(map);
-
-    const local = new (Layer as unknown as typeof L.TileLayer)("", {
-      minZoom: 1,
-      maxZoom: 22,
-      minNativeZoom: nativeMinZoom,
-      maxNativeZoom: nativeMaxZoom,
-      attribution: "&copy; OpenStreetMap / Carto",
-      errorTileUrl:
-        "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
-    });
-    local.addTo(map);
-
-    return () => {
-      map.removeLayer(local);
-      map.removeLayer(online);
-    };
-  }, [map, packagePath, nativeMinZoom, nativeMaxZoom]);
-  return null;
-}
 
 function FlyTo({
   center,
@@ -232,9 +184,6 @@ function UserMarkersLayer({
 }
 
 interface Props {
-  packagePath: string;
-  nativeMinZoom?: number;
-  nativeMaxZoom?: number;
   center: [number, number];
   zoom: number;
   focusNonce?: number;
@@ -249,9 +198,6 @@ interface Props {
 }
 
 export function LocalMapView({
-  packagePath,
-  nativeMinZoom = 12,
-  nativeMaxZoom = 14,
   center,
   zoom,
   focusNonce = 0,
@@ -264,38 +210,21 @@ export function LocalMapView({
   onBoundsChange,
   onPointClick,
 }: Props) {
-  if (!packagePath) {
-    return (
-      <div className="empty map-missing-key">
-        Локальная карта не выбрана
-        <div className="muted" style={{ marginTop: 8 }}>
-          В настройках выберите город и нажмите «Скачать пакет карты» или загрузите готовый ZIP.
-        </div>
-      </div>
-    );
-  }
-
-  const viewMin = Math.max(1, nativeMinZoom - 2);
-  const viewMax = 19;
-  const initialZoom = Math.min(Math.max(zoom, viewMin), viewMax);
+  const initialZoom = Math.min(Math.max(zoom, VIEW_MIN_ZOOM), VIEW_MAX_ZOOM);
 
   return (
     <MapContainer
       center={center}
       zoom={initialZoom}
-      minZoom={viewMin}
-      maxZoom={viewMax}
+      minZoom={VIEW_MIN_ZOOM}
+      maxZoom={VIEW_MAX_ZOOM}
       zoomControl
       style={{ width: "100%", height: "100%" }}
     >
-      <LocalTiles
-        packagePath={packagePath}
-        nativeMinZoom={nativeMinZoom}
-        nativeMaxZoom={nativeMaxZoom}
-      />
+      <MapLibreBasemap />
       <FlyTo
         center={center}
-        zoom={Math.min(Math.max(zoom, viewMin), viewMax)}
+        zoom={Math.min(Math.max(zoom, VIEW_MIN_ZOOM), VIEW_MAX_ZOOM)}
         nonce={focusNonce}
       />
       <BoundsWatcher onBounds={onBoundsChange} />

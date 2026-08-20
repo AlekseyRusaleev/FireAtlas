@@ -2,8 +2,8 @@ import { useEffect } from "react";
 import L from "leaflet";
 import { useMap } from "react-leaflet";
 
-const MIN_HOUSE_NUMBER_ZOOM = 15;
-const MAX_LABELS = 800;
+/** Крупные номера уже на квартальном зуме, не только на максимуме. */
+const MIN_HOUSE_NUMBER_ZOOM = 13;
 const CACHE_LIMIT = 24;
 const HOUSE_NUMBERS_URL = "https://geo.infocardmchs.ru/housenumbers";
 
@@ -26,6 +26,20 @@ function escapeHtml(value: string): string {
     /[&<>'"]/g,
     (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]!
   );
+}
+
+function labelLimit(zoom: number): number {
+  if (zoom >= 16) return 1200;
+  if (zoom >= 15) return 800;
+  if (zoom >= 14) return 500;
+  return 350;
+}
+
+function fontPx(zoom: number): number {
+  if (zoom >= 16) return 18;
+  if (zoom >= 15) return 16;
+  if (zoom >= 14) return 14;
+  return 12;
 }
 
 function cacheKey(map: L.Map): string {
@@ -67,13 +81,14 @@ export function HouseNumbersLayer() {
 
     function draw(labels: HouseLabel[]) {
       layer.clearLayers();
+      const size = fontPx(map.getZoom());
       for (const item of labels) {
         L.marker([item.lat, item.lon], {
           interactive: false,
           keyboard: false,
           icon: L.divIcon({
             className: "house-number-marker",
-            html: `<span>${escapeHtml(item.number)}</span>`,
+            html: `<span style="font-size:${size}px">${escapeHtml(item.number)}</span>`,
             iconSize: [0, 0],
             iconAnchor: [0, 0],
           }),
@@ -88,7 +103,7 @@ export function HouseNumbersLayer() {
         west: bounds.getWest().toFixed(6),
         north: bounds.getNorth().toFixed(6),
         east: bounds.getEast().toFixed(6),
-        limit: String(MAX_LABELS),
+        limit: String(labelLimit(map.getZoom())),
       });
 
       controller = new AbortController();

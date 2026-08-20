@@ -39,14 +39,14 @@ location /updates/ {
 4. Посчитать хеш ZIP и setup.exe:
 
 ```powershell
-Get-FileHash .\FireAtlas-0.1.33-portable.zip -Algorithm SHA256
-Get-FileHash .\FireAtlas-0.1.33-setup.exe -Algorithm SHA256
+Get-FileHash .\FireAtlas-0.1.34-portable.zip -Algorithm SHA256
+Get-FileHash .\FireAtlas-0.1.34-setup.exe -Algorithm SHA256
 ```
 
 5. Положить файлы в `/var/www/fireatlas-updates/`:
 
 ```bash
-sudo cp FireAtlas-0.1.33-portable.zip FireAtlas-0.1.33-setup.exe FireAtlas-Setup.exe latest.json /var/www/fireatlas-updates/
+sudo cp FireAtlas-0.1.34-portable.zip FireAtlas-0.1.34-setup.exe FireAtlas-Setup.exe latest.json /var/www/fireatlas-updates/
 sudo chown www-data:www-data /var/www/fireatlas-updates/*
 ```
 
