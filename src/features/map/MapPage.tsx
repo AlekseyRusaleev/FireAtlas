@@ -4,6 +4,7 @@ import { hasReadableText, sanitizeDescription } from "../../shared/html";
 import {
   WATER_TYPE_SHORT,
   type AppSettings,
+  type MapPackageInfo,
   type MarkerFileInfo,
   type MarkersState,
   type NearbyPoint,
@@ -18,6 +19,8 @@ import { PdfViewer } from "../../shared/PdfViewer";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   distanceKm,
+  expandStreetAbbreviations,
+  extractStreetAddress,
   geocodeAddress,
   parseAddressQuery,
   suggestAddresses,
@@ -182,7 +185,7 @@ function addressFromDescription(raw?: string | null): string | null {
 function isLikelyAddress(query: string): boolean {
   return (
     /\d/.test(query) ||
-    /\b(ул\.?|улица|проспект|пр-т|переулок|пер\.?|шоссе|проезд|бульвар|наб\.?|набережная|дом|д\.)\b/i.test(
+    /\b(ул\.?|улица|проспект|пр-?т|п-?т|пр\.|переулок|пер\.?|шоссе|проезд|бульвар|наб\.?|набережная|дом|д\.)\b/i.test(
       query
     )
   );
@@ -190,18 +193,7 @@ function isLikelyAddress(query: string): boolean {
 
 /** Нормализация адреса карточки для геокодера (п-т. → проспект и т.п.). */
 function normalizeAddressForGeocode(raw: string, city?: string): string {
-  let s = raw.trim();
-  s = s
-    .replace(/\bп-?т\.?\b/gi, "проспект")
-    .replace(/\bпр-?т\.?\b/gi, "проспект")
-    .replace(/\bпр\.?\b/gi, "проспект")
-    .replace(/\bул\.?\b/gi, "улица")
-    .replace(/\bпер\.?\b/gi, "переулок")
-    .replace(/\bнаб\.?\b/gi, "набережная")
-    .replace(/\bпл\.?\b/gi, "площадь")
-    .replace(/\bмкр\.?\b/gi, "микрорайон")
-    .replace(/\s+/g, " ")
-    .trim();
+  let s = expandStreetAbbreviations(raw);
   const cityName = city?.trim();
   if (cityName && !s.toLowerCase().includes(cityName.toLowerCase())) {
     s = `${s}, ${cityName}`;
@@ -211,42 +203,17 @@ function normalizeAddressForGeocode(raw: string, city?: string): string {
 
 /** Достаём хвост адреса из названия папки ИК. */
 function addressFromCardTitle(title: string): string | null {
-  const byComma = title.split(",").map((x) => x.trim()).filter(Boolean);
-  if (byComma.length >= 2) {
-    const tail = byComma.slice(-2).join(", ");
-    if (tail.length > 5) return tail;
-  }
-  const guillemet = title.lastIndexOf("»");
-  if (guillemet >= 0) {
-    const tail = title.slice(guillemet + 1).replace(/^[\s,]+/, "").trim();
-    if (tail.length > 5) return tail;
-  }
-  return null;
-}
-
-/** «…Институт ул. Институтская, 3» → «ул. Институтская, 3». */
-function streetAddressFromInfocard(title: string): string | null {
-  const m = title.match(
-    /(?:ул\.?|улица|пр\.?-?т\.?|проспект|пер\.?|переулок|пл\.?|площадь|б-р|бульвар|шоссе|наб\.?|набережная)\s*[^,]*,?\s*\d+[а-яa-z/\-]*/i
-  );
-  if (m) return m[0].replace(/\s+/g, " ").trim();
-  return addressFromCardTitle(title);
+  return extractStreetAddress(title);
 }
 
 function infocardGeocodeCandidates(hit: SearchHit, city: string): string[] {
   const folder = hit.infocard_folder_name || "";
   const path = hit.subtitle.replace(/^Infocard\s*·\s*/i, "").trim();
-  const parsed = parseAddressQuery(hit.title);
-  const streetHouse = [...parsed.streetTokens, parsed.house || ""].filter(Boolean).join(" ");
   return uniqueNonEmpty([
-    streetAddressFromInfocard(hit.title),
-    streetAddressFromInfocard(folder),
-    streetAddressFromInfocard(path),
-    streetHouse || null,
-    hit.address,
-    hit.title,
-    folder,
-    path,
+    extractStreetAddress(hit.title),
+    extractStreetAddress(folder),
+    extractStreetAddress(path),
+    hit.address ? extractStreetAddress(hit.address) || hit.address : null,
   ]).map((x) => normalizeAddressForGeocode(x, city));
 }
 
@@ -485,6 +452,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
   const [pdfPreview, setPdfPreview] = useState<{ url: string; title: string; path: string } | null>(
     null
   );
+  const [localPack, setLocalPack] = useState<MapPackageInfo | null>(null);
   const draftNameRef = useRef<HTMLInputElement>(null);
 
   const sideList =
@@ -542,6 +510,26 @@ export function MapPage({ settings, onOpenCard }: Props) {
   useEffect(() => {
     void refreshLists();
   }, []);
+
+  useEffect(() => {
+    if (!settings.local_map_path) {
+      setLocalPack(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const packs = await api.listMapPackages();
+        const match =
+          packs.find((p) => p.path === settings.local_map_path) ||
+          packs.find((p) => p.id === settings.local_map_city_id) ||
+          packs.find((p) => p.ready) ||
+          null;
+        setLocalPack(match);
+      } catch {
+        setLocalPack(null);
+      }
+    })();
+  }, [settings.local_map_path, settings.local_map_city_id]);
 
   useEffect(() => {
     void (async () => {
@@ -726,6 +714,8 @@ export function MapPage({ settings, onOpenCard }: Props) {
 
   async function focusInfocardOnMap(hit: SearchHit) {
     const gen = ++infocardFocusGen.current;
+    // Сразу убираем чужую метку, чтобы при ошибке геокодера не оставался предыдущий объект
+    setSearchPin(null);
     if (hit.lat != null && hit.lon != null) {
       setSearchPin({ lat: hit.lat, lon: hit.lon, label: hit.title });
       moveTo(hit.lat, hit.lon, ADDRESS_ZOOM);
@@ -740,7 +730,10 @@ export function MapPage({ settings, onOpenCard }: Props) {
       return;
     }
     const candidates = infocardGeocodeCandidates(hit, settings.default_city);
-    let lastErr = "Адрес карточки не удалось показать на карте";
+    let lastErr =
+      candidates.length === 0
+        ? "В названии карточки нет улицы и номера дома"
+        : "Адрес карточки не удалось показать на карте";
     for (const addr of candidates) {
       try {
         const found = await geocodeAddress(addr, settings.yandex_api_key, {
@@ -1751,6 +1744,9 @@ export function MapPage({ settings, onOpenCard }: Props) {
         </div>
 
         <LocalMapView
+          packagePath={settings.local_map_path}
+          nativeMinZoom={localPack?.min_zoom || 12}
+          nativeMaxZoom={localPack?.max_zoom || 14}
           center={center}
           zoom={focusZoom || settings.default_zoom}
           focusNonce={focusNonce}

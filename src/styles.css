@@ -223,18 +223,8 @@ button {
   background: #e8e4dc;
 }
 
-.fireatlas-gl-layer,
-.fireatlas-gl-layer .maplibregl-map,
-.fireatlas-gl-layer canvas.maplibregl-canvas {
-  width: 100% !important;
-  height: 100% !important;
-}
-
-.map-pane .maplibregl-ctrl-bottom-left,
-.map-pane .maplibregl-ctrl-bottom-right,
-.map-pane .maplibregl-ctrl-top-left,
-.map-pane .maplibregl-ctrl-top-right {
-  display: none;
+.map-pane .leaflet-tile-pane img.leaflet-tile {
+  filter: contrast(1.18) saturate(1.12) brightness(0.97);
 }
 
 .map-toolbar .btn {
@@ -270,7 +260,7 @@ button {
 .provider-map {
   width: 100%;
   height: 100%;
-  background: #12161a;
+  background: #e8e4dc;
 }
 
 .provider-map-wrap {

@@ -32,6 +32,9 @@ export const STREET_STOP = new Set([
   "проспект",
   "пр",
   "пр-т",
+  "п-т",
+  "пр-кт",
+  "просп",
   "переулок",
   "пер",
   "шоссе",
@@ -48,6 +51,18 @@ export const STREET_STOP = new Set([
   "микрорайон",
   "мкр",
 ]);
+
+const STREET_TYPES = [
+  "проспект",
+  "улица",
+  "переулок",
+  "площадь",
+  "бульвар",
+  "шоссе",
+  "набережная",
+  "проезд",
+  "микрорайон",
+] as const;
 
 /** Слова места/региона — не улица; в названиях ИК их часто нет. */
 export const PLACE_STOP = new Set([
@@ -69,11 +84,13 @@ export const PLACE_STOP = new Set([
   "кировский",
 ]);
 
-const HOUSE_NUM_RE = "\\d+[а-яa-z]?(?:[\\/-]\\d+[а-яa-z]?)?";
+/** «59а», «90,1», «90/1», «59-1», «88 a». */
+export const HOUSE_NUM_RE = "\\d+[а-яa-z]?(?:\\s*[\\/,.\\-\\u2013\\u2014]\\s*\\d+[а-яa-z]?)?";
 
 interface ParsedQuery {
   streetTokens: string[];
   house: string | null;
+  streetType: string | null;
 }
 
 interface RankedCandidate extends GeocodeResult {
@@ -112,14 +129,78 @@ export function distanceKm(lat1: number, lon1: number, lat2: number, lon2: numbe
   return 2 * 6371 * Math.asin(Math.sqrt(a));
 }
 
+const LETTER_LEFT = "(^|[^0-9а-яёА-ЯЁa-zA-Z])";
+
+/** пр.Ленина / прЛенина / п-т. Октябрьский → «проспект …» с пробелом. */
+export function expandStreetAbbreviations(raw: string): string {
+  const toWord = (word: string) => (_m: string, pre: string) => `${pre}${word} `;
+  // «прЛенина»: только заглавная после сокращения — иначе «променад» станет «проспект оменад».
+  const glued = (abbr: string) => new RegExp(`${LETTER_LEFT}(?:${abbr})(?=[А-ЯЁ])`, "g");
+  return raw
+    .replace(/[–—−]/g, "-")
+    .replace(new RegExp(`${LETTER_LEFT}п-?т\\.?`, "gi"), toWord("проспект"))
+    .replace(new RegExp(`${LETTER_LEFT}пр-?кт\\.?`, "gi"), toWord("проспект"))
+    .replace(new RegExp(`${LETTER_LEFT}пр-?т\\.?`, "gi"), toWord("проспект"))
+    .replace(new RegExp(`${LETTER_LEFT}пр\\.`, "gi"), toWord("проспект"))
+    .replace(new RegExp(`${LETTER_LEFT}пр(\\s+)`, "gi"), (_m, pre: string) => `${pre}проспект `)
+    .replace(new RegExp(`${LETTER_LEFT}пр-(?=[А-ЯЁа-яё])`, "g"), toWord("проспект"))
+    .replace(glued("пр|ПР|Пр"), toWord("проспект"))
+    .replace(new RegExp(`${LETTER_LEFT}ул\\.`, "gi"), toWord("улица"))
+    .replace(new RegExp(`${LETTER_LEFT}ул(\\s+)`, "gi"), (_m, pre: string) => `${pre}улица `)
+    .replace(glued("ул|УЛ|Ул"), toWord("улица"))
+    .replace(new RegExp(`${LETTER_LEFT}пер\\.`, "gi"), toWord("переулок"))
+    .replace(new RegExp(`${LETTER_LEFT}пер(\\s+)`, "gi"), (_m, pre: string) => `${pre}переулок `)
+    .replace(glued("пер|ПЕР|Пер"), toWord("переулок"))
+    .replace(new RegExp(`${LETTER_LEFT}наб\\.`, "gi"), toWord("набережная"))
+    .replace(new RegExp(`${LETTER_LEFT}пл\\.`, "gi"), toWord("площадь"))
+    .replace(new RegExp(`${LETTER_LEFT}б-р\\.?`, "gi"), toWord("бульвар"))
+    .replace(new RegExp(`${LETTER_LEFT}мкр\\.`, "gi"), toWord("микрорайон"))
+    .replace(new RegExp(`${LETTER_LEFT}д\\.?\\s*(?=\\d)`, "gi"), "$1")
+    .replace(/,/g, ", ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function foldHouseChars(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/a/g, "а")
+    .replace(/b/g, "б")
+    .replace(/c/g, "с")
+    .replace(/e/g, "е")
+    .replace(/h/g, "н")
+    .replace(/k/g, "к")
+    .replace(/m/g, "м")
+    .replace(/o/g, "о")
+    .replace(/p/g, "р")
+    .replace(/t/g, "т")
+    .replace(/x/g, "х")
+    .replace(/y/g, "у");
+}
+
 function normalizeHouse(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const h = raw
-    .toLowerCase()
+  let h = foldHouseChars(raw)
     .replace(/^д\.?\s*/i, "")
     .replace(/\s+/g, "")
+    .replace(/корп(?:ус)?/g, "/")
+    .replace(/строен(?:ие)?/g, "/")
+    .replace(/,/g, "/")
+    .replace(/\./g, "/")
+    .replace(/-/g, "/")
+    .replace(/(\d)к(\d)/g, "$1/$2")
     .trim();
   return h || null;
+}
+
+function detectStreetType(q: string): string | null {
+  const lower = q.toLowerCase();
+  for (const t of STREET_TYPES) {
+    const re = new RegExp(`(^|[^0-9а-яёa-z])${t}([^0-9а-яёa-z]|$)`, "i");
+    if (re.test(lower)) return t;
+  }
+  return null;
 }
 
 function tokenizeStreet(raw: string): string[] {
@@ -134,7 +215,7 @@ function tokenizeStreet(raw: string): string[] {
         !STREET_STOP.has(t) &&
         !PLACE_STOP.has(t) &&
         !/^\d{5,6}$/.test(t) &&
-        !/^\d+[а-яa-z]?$/i.test(t)
+        !new RegExp(`^${HOUSE_NUM_RE}$`, "i").test(t)
     );
 }
 
@@ -144,15 +225,7 @@ function isPostalCode(num: string): boolean {
 
 /** Разбор «Ленина 56», «Ленина, 62Б, Кемерово», «62Б, проспект Ленина, …». */
 export function parseAddressQuery(query: string): ParsedQuery {
-  let q = query
-    .trim()
-    .replace(/\bп-?т\.?\b/gi, "проспект")
-    .replace(/\bпр-?т\.?\b/gi, "проспект")
-    .replace(/\bул\.?\b/gi, "улица")
-    .replace(/\bпер\.?\b/gi, "переулок")
-    .replace(/\bд\.?\s*(?=\d)/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  let q = expandStreetAbbreviations(query);
 
   let house: string | null = null;
 
@@ -163,7 +236,7 @@ export function parseAddressQuery(query: string): ParsedQuery {
     q = q.slice(leading[0].length).trim();
   }
 
-  // «… Ленина, 62Б, Кемерово» или «… Ленина 62Б» в конце / перед городом
+  // «… Ленина, 62Б, Кемерово» или «… Ленина 62Б» / «90,1» в конце / перед городом
   if (!house) {
     const beforePlace = q.match(
       new RegExp(`(?:,\\s*|\\s+)(?:дом\\s+)?(${HOUSE_NUM_RE})(?=\\s*,\\s*[^\\d]|\\s*$)`, "i")
@@ -183,21 +256,56 @@ export function parseAddressQuery(query: string): ParsedQuery {
     .replace(/\s+/g, " ")
     .trim();
 
-  return { streetTokens: tokenizeStreet(q), house };
+  const streetType = detectStreetType(q);
+  return { streetTokens: tokenizeStreet(q), house, streetType };
+}
+
+/**
+ * Из названия ИК достаём только улицу и дом: «ТРК Лапландия, п-т. Октябрьский, 34»
+ * → «проспект Октябрьский, 34». Название ТЦ в геокодер не отдаём.
+ */
+export function extractStreetAddress(title: string): string | null {
+  const expanded = expandStreetAbbreviations(title);
+  const typedRe = new RegExp(
+    `(?:${STREET_TYPES.join("|")})\\s+[^,]+?,?\\s*(?:дом\\s+)?${HOUSE_NUM_RE}`,
+    "gi"
+  );
+  let typed: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = typedRe.exec(expanded))) typed = m;
+  if (typed) return typed[0].replace(/\s+/g, " ").trim();
+
+  const parsed = parseAddressQuery(expanded);
+  if (parsed.house && parsed.streetTokens.length > 0) {
+    const street = parsed.streetTokens[parsed.streetTokens.length - 1];
+    const commaHouse = new RegExp(`,\\s*(?:дом\\s+)?${HOUSE_NUM_RE}\\s*$`, "i");
+    // Тип улицы уже известен, либо дом идёт после запятой («Ленина, 59а»), а не «Променад 3»
+    if (parsed.streetType || commaHouse.test(expanded)) {
+      const type = parsed.streetType ? `${parsed.streetType} ` : "";
+      return `${type}${street}, ${parsed.house}`;
+    }
+  }
+  return null;
 }
 
 function houseMatches(wanted: string | null, got: string | null | undefined): boolean {
   if (!wanted) return true;
   const g = normalizeHouse(got);
-  if (!g) return false;
-  return g === wanted;
+  const w = normalizeHouse(wanted);
+  if (!g || !w) return false;
+  if (g === w) return true;
+  // «59а» и «59а/1» не считаем равными; «90,1» уже свёрнут в 90/1
+  return false;
 }
 
-/** Номер дома встречается в подписи как отдельный фрагмент. */
+/** Номер дома как отдельный фрагмент адреса, не «Променад-1». */
 function houseInLabel(label: string, wanted: string): boolean {
-  const esc = wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`(^|[^0-9])${esc}(?![0-9а-яa-z])`, "i");
-  return re.test(label);
+  const w = normalizeHouse(wanted);
+  if (!w) return false;
+  const folded = foldHouseChars(label).replace(/,/g, "/");
+  const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(?:^|[,;/\\s]|\\bдом\\s+)${esc}(?=$|[,;/\\s])`, "i");
+  return re.test(folded);
 }
 
 function scoreCandidate(
@@ -215,11 +323,13 @@ function scoreCandidate(
   // Есть улица в запросе, но ни одного значимого слова в ответе — отбрасываем
   if (streetNeed > 0 && streetHits === 0) return null;
 
-  // В запросе указан дом — требуем совпадение номера, иначе это чужой дом/здание
+  // В запросе указан дом — не берём чужой дом и не верим подписи, если геокодер отдал поле house
   if (parsed.house) {
-    const fromField = houseMatches(parsed.house, cand.house);
-    const fromLabel = houseInLabel(cand.label, parsed.house);
-    if (!fromField && !fromLabel) return null;
+    if (cand.house) {
+      if (!houseMatches(parsed.house, cand.house)) return null;
+    } else if (!houseInLabel(cand.label, parsed.house)) {
+      return null;
+    }
   }
 
   let score = 0;
@@ -227,8 +337,13 @@ function scoreCandidate(
     score += Math.round((streetHits / streetNeed) * 500);
     if (streetHits === streetNeed) score += 200;
   }
-  if (parsed.house && (houseMatches(parsed.house, cand.house) || houseInLabel(cand.label, parsed.house))) {
+  if (parsed.streetType && cand.street && cand.street.toLowerCase().includes(parsed.streetType)) {
+    score += 80;
+  }
+  if (parsed.house && houseMatches(parsed.house, cand.house)) {
     score += 800;
+  } else if (parsed.house && houseInLabel(cand.label, parsed.house)) {
+    score += 720;
   } else if (!parsed.house) {
     score += 50;
   }
@@ -344,9 +459,13 @@ async function geocodeAddressUncached(
   const queryVariants = [biasedQuery];
   if (parsed.house && parsed.streetTokens.length) {
     const street = parsed.streetTokens.join(" ");
+    const named = parsed.streetType ? `${parsed.streetType} ${street}` : street;
     const suffix = city ? `, ${city}` : "";
-    queryVariants.push(`${street}, ${parsed.house}${suffix}`);
-    queryVariants.push(`улица ${street}, ${parsed.house}${suffix}`);
+    queryVariants.push(`${named}, ${parsed.house}${suffix}`);
+    // «улица Ленина» и «проспект Ленина» — разные улицы; не подставляем «улица», если тип уже известен
+    if (!parsed.streetType) {
+      queryVariants.push(`улица ${street}, ${parsed.house}${suffix}`);
+    }
   }
   const uniqueQueries = [...new Set(queryVariants)];
   const errors: string[] = [];
@@ -549,10 +668,6 @@ async function geocodeViaJsApi(
       const lat = Number(coords[0]);
       const lon = Number(coords[1]);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      const label =
-        (typeof obj.getAddressLine === "function" ? obj.getAddressLine() : null) ||
-        obj.properties?.get("text") ||
-        q;
       const meta = obj.properties?.get("metaDataProperty")?.GeocoderMetaData;
       const house =
         meta?.Address?.Components?.find((c: any) => c.kind === "house")?.name ||
@@ -560,6 +675,11 @@ async function geocodeViaJsApi(
       const street =
         meta?.Address?.Components?.find((c: any) => c.kind === "street")?.name ||
         null;
+      const label =
+        (typeof obj.getAddressLine === "function" ? obj.getAddressLine() : null) ||
+        obj.properties?.get("text") ||
+        [street, house].filter(Boolean).join(", ") ||
+        "адрес";
       out.push({
         lat,
         lon,
@@ -620,7 +740,10 @@ async function geocodeViaHttp(
     const house = comps.find((c) => c.kind === "house")?.name || null;
     const street = comps.find((c) => c.kind === "street")?.name || null;
     const label =
-      geoObject.metaDataProperty?.GeocoderMetaData?.text || geoObject.name || q;
+      geoObject.metaDataProperty?.GeocoderMetaData?.text ||
+      geoObject.name ||
+      [street, house].filter(Boolean).join(", ") ||
+      "адрес";
     out.push({
       lat,
       lon,
@@ -662,11 +785,7 @@ async function geocodeViaPhoton(
       .filter(Boolean)
       .map(String);
     // name часто — POI; улицу/дом ставим первыми для понятной подписи
-    const label = parts.length
-      ? parts.join(", ")
-      : p.name
-        ? String(p.name)
-        : q;
+    const label = parts.length ? parts.join(", ") : p.name ? String(p.name) : "адрес";
     const km = bias ? distanceKm(bias.lat, bias.lon, lat, lon) : 0;
     if (bias && km > radiusKm * 1.15) continue;
     out.push({ lat, lon, label, score: 0, km, house, street });
@@ -686,9 +805,9 @@ async function geocodeViaNominatim(
   const base = `${hostBase.replace(/\/$/, "")}/search?format=json&addressdetails=1&limit=8&countrycodes=ru`;
 
   if (parsed.house && parsed.streetTokens.length && city) {
-    const street = `${parsed.streetTokens.join(" ")} ${parsed.house}`;
+    const streetName = [parsed.streetType, ...parsed.streetTokens].filter(Boolean).join(" ");
     urls.push(
-      `${base}&street=${encodeURIComponent(street)}&city=${encodeURIComponent(city)}`
+      `${base}&street=${encodeURIComponent(`${parsed.house} ${streetName}`)}&city=${encodeURIComponent(city)}`
     );
   }
   urls.push(`${base}&q=${encodeURIComponent(q)}`);
@@ -716,7 +835,7 @@ async function geocodeViaNominatim(
       local.push({
         lat,
         lon,
-        label: String(item.display_name || q),
+        label: String(item.display_name || [addr.road, addr.house_number].filter(Boolean).join(", ") || "адрес"),
         score: 0,
         km,
         house: addr.house_number ? String(addr.house_number) : null,

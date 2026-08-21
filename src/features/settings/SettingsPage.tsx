@@ -758,10 +758,10 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
         </div>
 
         <div className="field">
-          <label>Скачать карту города (необязательно)</label>
+          <label>Скачать карту города (локальные тайлы)</label>
           <div className="muted" style={{ marginBottom: 8, fontSize: 13 }}>
-            Живая карта — векторная MapLibre из интернета. PNG-пакет больше не нужен, чтобы видеть
-            улицы и номера домов.
+            PNG-пакет города кладётся на диск: улицы работают без интернета и так же
+            подключаются новые города. Без пакета карта идёт из интернета (растр OSM/Carto).
           </div>
           <div className="row">
             <input
@@ -864,8 +864,7 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
             </div>
           ) : (
             <div className="status-banner">
-              Карта векторная (MapLibre). Скачивать PNG-пакет не обязательно — подложка идёт из
-              интернета.
+              Пакет не выбран. На карте будет интернет-растр; для офлайна скачайте город.
             </div>
           )}
           {packages.length > 0 && (

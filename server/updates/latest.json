@@ -1,13 +1,13 @@
 {
-  "version": "0.1.35",
-  "notes": "Карта OSM/OpenFreeMap снова рисуется. Крупные номера домов с зума 13.",
-  "publishedAt": "2026-08-20",
+  "version": "0.1.43",
+  "notes": "Переход к объекту: «прЛенина,59а», «ул. Ленина, 59-1» и другие адреса без пробелов и с дефисом.",
+  "publishedAt": "2026-08-21",
   "installer": {
     "url": "https://geo.infocardmchs.ru/updates/FireAtlas-Setup.exe",
-    "sha256": "f65acc48ddfddde8223d1357afbc63cfa9c0a0b9fdee1ca6bcdf88ddad28cc5e"
+    "sha256": "5ed0f46e2921e453bba0e61ac448f4b888a31f3838445b842a4f4754d94cbc6a"
   },
   "portable": {
-    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.35-portable.zip",
-    "sha256": "ddbce2d302220aca52921095e04f4ddcc061881a8c66a63e816554892620f596"
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.43-portable.zip",
+    "sha256": "fee797af40e842cd01f15b92bfe334947fe5679f5d1bd898697a1585a9fda257"
   }
 }

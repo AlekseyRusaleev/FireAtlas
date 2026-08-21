@@ -1,6 +1,6 @@
 [package]
 name = "fire-atlas"
-version = "0.1.35"
+version = "0.1.43"
 description = "Пожарный Атлас — поиск ИППВ и информационных карточек"
 authors = ["FireAtlas"]
 edition = "2021"

@@ -1,15 +1,25 @@
 import { useEffect, useRef } from "react";
 import { MapContainer, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import "leaflet/dist/leaflet.css";
 import type { WaterPoint } from "../../shared/types";
 import type { SearchPin } from "./YandexMapView";
 import { HouseNumbersLayer } from "./HouseNumbersLayer";
 import { WaterClusterLayer } from "./WaterClusterLayer";
-import { MapLibreBasemap } from "./MapLibreBasemap";
 
 const VIEW_MIN_ZOOM = 4;
 const VIEW_MAX_ZOOM = 20;
+
+/** Геометрия без подписей — если OSM не открылся, латиницы всё равно нет. */
+const GEOMETRY_URL =
+  "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png";
+
+/** OSM Carto (HOT): в России в тайле поле name — кириллица, без транслита Carto/Esri. */
+const OSM_LOCAL_URL = "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png";
+
+const TRANSPARENT_TILE =
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
 const SEARCH_PIN_ICON = L.divIcon({
   className: "",
@@ -17,6 +27,66 @@ const SEARCH_PIN_ICON = L.divIcon({
   iconSize: [22, 22],
   iconAnchor: [11, 11],
 });
+
+function BasemapLayers({
+  packagePath,
+  nativeMinZoom,
+  nativeMaxZoom,
+}: {
+  packagePath: string;
+  nativeMinZoom: number;
+  nativeMaxZoom: number;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    const geometry = L.tileLayer(GEOMETRY_URL, {
+      subdomains: "abcd",
+      minZoom: 1,
+      maxZoom: VIEW_MAX_ZOOM,
+      maxNativeZoom: 20,
+      attribution: "&copy; OpenStreetMap",
+    });
+    geometry.addTo(map);
+
+    let local: L.TileLayer | null = null;
+    if (packagePath) {
+      const root = packagePath.replace(/[/\\]+$/, "");
+      const sep = root.includes("\\") ? "\\" : "/";
+      const Layer = L.TileLayer.extend({
+        getTileUrl(coords: L.Coords) {
+          const tilePath = `${root}${sep}${coords.z}${sep}${coords.x}${sep}${coords.y}.png`;
+          return convertFileSrc(tilePath);
+        },
+      });
+      local = new (Layer as unknown as typeof L.TileLayer)("", {
+        minZoom: nativeMinZoom,
+        maxZoom: nativeMaxZoom,
+        minNativeZoom: nativeMinZoom,
+        maxNativeZoom: nativeMaxZoom,
+        attribution: "&copy; OpenStreetMap",
+        errorTileUrl: TRANSPARENT_TILE,
+      });
+      local.addTo(map);
+    }
+
+    const labels = L.tileLayer(OSM_LOCAL_URL, {
+      subdomains: "abc",
+      minZoom: 1,
+      maxZoom: VIEW_MAX_ZOOM,
+      maxNativeZoom: 19,
+      attribution: "&copy; OpenStreetMap",
+      errorTileUrl: TRANSPARENT_TILE,
+    });
+    labels.addTo(map);
+
+    return () => {
+      map.removeLayer(labels);
+      if (local) map.removeLayer(local);
+      map.removeLayer(geometry);
+    };
+  }, [map, packagePath, nativeMinZoom, nativeMaxZoom]);
+  return null;
+}
 
 function FlyTo({
   center,
@@ -31,7 +101,6 @@ function FlyTo({
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   useEffect(() => {
-    // Не принудительно ставить default_zoom: иначе клик по ИППВ отъезжает с 17 на 12–15.
     map.invalidateSize();
     map.setView(center, Math.max(map.getZoom(), zoomRef.current), {
       animate: true,
@@ -184,6 +253,9 @@ function UserMarkersLayer({
 }
 
 interface Props {
+  packagePath?: string;
+  nativeMinZoom?: number;
+  nativeMaxZoom?: number;
   center: [number, number];
   zoom: number;
   focusNonce?: number;
@@ -198,6 +270,9 @@ interface Props {
 }
 
 export function LocalMapView({
+  packagePath = "",
+  nativeMinZoom = 12,
+  nativeMaxZoom = 14,
   center,
   zoom,
   focusNonce = 0,
@@ -221,7 +296,11 @@ export function LocalMapView({
       zoomControl
       style={{ width: "100%", height: "100%" }}
     >
-      <MapLibreBasemap />
+      <BasemapLayers
+        packagePath={packagePath}
+        nativeMinZoom={nativeMinZoom}
+        nativeMaxZoom={nativeMaxZoom}
+      />
       <FlyTo
         center={center}
         zoom={Math.min(Math.max(zoom, VIEW_MIN_ZOOM), VIEW_MAX_ZOOM)}

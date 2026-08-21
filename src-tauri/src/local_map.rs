@@ -496,22 +496,20 @@ pub fn prepare_package(
     #[derive(Clone, Copy)]
     enum TileUrlKind {
         Xyz,
-        Esri,
     }
     let tile_hosts: &[(&str, TileUrlKind)] = &[
-        ("https://basemaps.cartocdn.com/rastertiles/voyager", TileUrlKind::Xyz),
-        ("https://a.basemaps.cartocdn.com/rastertiles/voyager", TileUrlKind::Xyz),
-        (
-            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile",
-            TileUrlKind::Esri,
-        ),
+        ("https://a.tile.openstreetmap.fr/hot", TileUrlKind::Xyz),
+        ("https://b.tile.openstreetmap.fr/hot", TileUrlKind::Xyz),
         ("https://tile.openstreetmap.org", TileUrlKind::Xyz),
+        (
+            "https://a.basemaps.cartocdn.com/rastertiles/voyager_nolabels",
+            TileUrlKind::Xyz,
+        ),
     ];
 
     fn tile_url(host: &str, kind: TileUrlKind, z: u32, x: u32, y: u32) -> String {
         match kind {
             TileUrlKind::Xyz => format!("{host}/{z}/{x}/{y}.png"),
-            TileUrlKind::Esri => format!("{host}/{z}/{y}/{x}"),
         }
     }
 
@@ -682,7 +680,7 @@ pub fn prepare_package(
         east,
         tile_count: ok,
         created_at: Local::now().to_rfc3339(),
-        source: "Carto Voyager / Esri / OpenStreetMap raster tiles".into(),
+        source: "OpenStreetMap (русские подписи, без транслита)".into(),
         radius_km: city.radius_km,
     };
     fs::write(
