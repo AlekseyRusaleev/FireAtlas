@@ -63,6 +63,9 @@ export default function App() {
   }, [settings.cards_mode]);
 
   useEffect(() => {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      return;
+    }
     const timer = window.setTimeout(() => {
       void api
         .checkForUpdates()

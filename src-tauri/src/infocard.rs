@@ -257,7 +257,7 @@ pub fn infocard_search_files(
     let lim = limit.unwrap_or(50);
 
     if session.access_token.is_empty() {
-        if session.offline_sync_done {
+        if session.offline_sync_done || crate::infocard_offline::offline_package_ready(&app) {
             return Ok(crate::infocard_offline::offline_search(&app, &query, lim)?
                 .into_iter()
                 .map(|h| InfocardFileHit {
@@ -271,7 +271,11 @@ pub fn infocard_search_files(
                 })
                 .collect());
         }
-        return Err("Не выполнен вход в Infocard".into());
+        return Err(
+            "Нет офлайн-базы Infocard. В настройках: «Локальная папка» для FireData \
+             или один раз «Скачать базу» при интернете."
+                .into(),
+        );
     }
 
     let path = format!(
@@ -396,7 +400,10 @@ pub fn infocard_list_folder_files(
     let mut session = load_session(&session_file);
 
     // Офлайн / нет токена — читаем кэш.
-    if session.access_token.is_empty() || session.offline_sync_done {
+    let offline_first = session.access_token.is_empty()
+        || session.offline_sync_done
+        || crate::infocard_offline::offline_package_ready(&app);
+    if offline_first {
         if let Ok(hits) = crate::infocard_offline::offline_list_folder_files(&app, &folder_id) {
             if !hits.is_empty() || session.access_token.is_empty() {
                 return Ok(hits);
@@ -548,18 +555,19 @@ pub fn infocard_open_pdf(
     let dir = app_data_dir(&app)?;
     let session_file = session_path(&dir);
     let mut session = load_session(&session_file);
-    if session.access_token.is_empty() {
-        if session.login.is_empty() || !session.offline_sync_done {
-            return Err("Не выполнен вход в Infocard".into());
-        }
-    }
-
     if let Ok(Some(cached)) = crate::infocard_offline::cached_pdf_path(&app, &file_id) {
         return Ok(cached.to_string_lossy().to_string());
     }
 
     if session.access_token.is_empty() {
-        return Err("PDF нет в офлайн-кэше".into());
+        if crate::infocard_offline::offline_package_ready(&app) {
+            return Err("PDF этой карточки не был сохранён в офлайн-базе".into());
+        }
+        return Err(
+            "PDF недоступен без интернета. Скачайте офлайн-базу Infocard в настройках \
+             или откройте документ из локальной папки FireData."
+                .into(),
+        );
     }
 
     let path = format!("/files/{}/pdf", urlencoding_lite(&file_id));
@@ -626,12 +634,22 @@ pub fn infocard_list_markers(
     let session_file = session_path(&dir);
     let mut session = load_session(&session_file);
     if session.access_token.is_empty() {
-        if session.offline_sync_done {
+        if session.offline_sync_done || crate::infocard_offline::offline_package_ready(&app) {
             if let Some(cached) = crate::infocard_offline::load_cached_markers(&app) {
                 return parse_markers_json(cached);
             }
+            return Ok(InfocardMarkersState {
+                markers: vec![],
+                file: None,
+                file_error: Some(
+                    "В офлайн-базе нет меток водоисточников. Используйте локальный KMZ.".into(),
+                ),
+            });
         }
-        return Err("Не выполнен вход в Infocard".into());
+        return Err(
+            "Метки с сервера недоступны без входа. Выберите «Локальный KMZ» или скачайте офлайн-базу."
+                .into(),
+        );
     }
 
     let resp = match authorized_get(&base, "/markers", &mut session, &session_file) {

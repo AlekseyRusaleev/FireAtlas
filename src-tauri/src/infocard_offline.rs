@@ -83,6 +83,11 @@ fn markers_path(root: &Path) -> PathBuf {
     root.join("markers.json")
 }
 
+/// Скачанная офлайн-база Infocard (PDF + каталог) — без входа и без сети.
+pub fn offline_package_ready(app: &AppHandle) -> bool {
+    get_sync_meta(app).ok().flatten().is_some()
+}
+
 pub fn get_sync_meta(app: &AppHandle) -> Result<Option<OfflineSyncMeta>, String> {
     let root = offline_root(app)?;
     let path = meta_path(&root);

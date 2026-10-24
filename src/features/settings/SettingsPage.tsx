@@ -187,7 +187,9 @@ function InfocardOfflineBlock() {
     <div className="field">
       <label>Офлайн-база Infocard</label>
       <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
-        Каталог, PDF и метки для работы без интернета. После первой загрузки вход и поиск доступны офлайн.
+        Каталог, PDF и метки Infocard для работы без интернета. Один раз при наличии сети войдите в
+        Infocard и нажмите «Скачать базу» — дальше поиск и PDF на карте работают без входа и без сети.
+        Для полностью локальной работы используйте папку FireData и KMZ (см. блок выше).
       </div>
       {meta ? (
         <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
@@ -693,6 +695,31 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
           </div>
         )}
 
+        <div className="status-banner ok" style={{ marginBottom: 4 }}>
+          <strong>Автономный компьютер (без интернета)</strong>
+          <div className="muted" style={{ marginTop: 8, fontSize: 13, lineHeight: 1.45 }}>
+            Рекомендуемый режим: локальная папка FireData (KMZ + информационные карточки), вшитые
+            карты НСО, источники «Локальная папка» и «Локальный KMZ». Поиск адресов по названию улицы
+            без сети недоступен — используйте координаты карточки или масштаб карты.
+          </div>
+          <button
+            type="button"
+            className="btn primary"
+            style={{ marginTop: 10 }}
+            disabled={busy}
+            onClick={() =>
+              setForm({
+                ...form,
+                cards_mode: "local",
+                markers_mode: "local",
+                map_provider: "local",
+              })
+            }
+          >
+            Применить рекомендуемые настройки
+          </button>
+        </div>
+
         <div className="field">
           <label>Путь к базе данных</label>
           <div className="row">
@@ -728,9 +755,9 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
             <option value="both">Оба источника (поиск на карте)</option>
           </select>
           <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-            Поиск карточек — на главном экране (карта). При режиме «Сервер Infocard» PDF открывается
-            прямо на карте; вкладка локальных файлов скрыта. Локальные DOC/Visio — только если
-            выбран источник «Локальная папка» или «Оба».
+            Для ПК без сети выберите «Локальная папка». Поиск — на вкладке «Карта» и «Информационные
+            карточки». Режим «Сервер» / «Оба» — карточки Infocard (онлайн или после «Скачать базу»
+            ниже).
           </div>
         </div>
 
@@ -756,10 +783,12 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
             <option value="server">Сервер Infocard (веб-кабинет)</option>
           </select>
           <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-            Серверные метки правятся в веб-кабинете. В приложении — только отображение после входа в
-            Infocard.
+            Для автономной работы — «Локальный файл (KMZ/KML)». Серверные метки — из Infocard (онлайн
+            или из скачанной офлайн-базы).
           </div>
         </div>
+
+        <InfocardOfflineBlock />
 
         {(form.cards_mode === "server" ||
           form.cards_mode === "both" ||
@@ -779,7 +808,6 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
               loginHint={form.infocard_login}
               onLoginSaved={(login) => setForm({ ...form, infocard_login: login })}
             />
-            <InfocardOfflineBlock />
           </>
         )}
 

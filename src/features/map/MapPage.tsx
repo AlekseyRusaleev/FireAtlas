@@ -522,20 +522,33 @@ export function MapPage({ settings, onOpenCard }: Props) {
         }
 
         let infocardHits: SearchHit[] = [];
+        let infocardSearchError: string | null = null;
         if (wantServerCards && q.length >= 2) {
           try {
             const files = await api.infocardSearchFiles(query.trim(), INFOCARD_SEARCH_LIMIT);
             infocardHits = groupInfocardSearchHits(files);
           } catch (err) {
-            setGeoError(
+            infocardSearchError =
               err instanceof Error
                 ? err.message
-                : "Не удалось искать карточки Infocard (проверьте вход в настройках)"
-            );
+                : "Не удалось искать карточки Infocard (проверьте вход в настройках)";
           }
         }
 
         setHits([...cardHits, ...infocardHits, ...waterHits].slice(0, 80));
+        if (wantServerCards && q.length >= 2) {
+          if (
+            infocardSearchError &&
+            cardHits.length === 0 &&
+            infocardHits.length === 0
+          ) {
+            setGeoError(infocardSearchError);
+          } else if (!infocardSearchError) {
+            setGeoError((prev) =>
+              prev?.includes("Infocard") || prev?.includes("офлайн-баз") ? null : prev
+            );
+          }
+        }
         setActiveIndex(0);
       })();
     }, 180);
