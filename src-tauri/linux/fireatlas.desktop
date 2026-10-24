@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Пожарный Атлас
+Comment={{comment}}
+Exec={{exec}}
+Icon={{icon}}
+Terminal=false
+Categories={{categories}}
+StartupWMClass=fire-atlas

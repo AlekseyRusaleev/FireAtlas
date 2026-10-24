@@ -1,6 +1,7 @@
 mod db;
 mod indexer;
 mod infocard;
+mod infocard_offline;
 mod kml;
 mod local_map;
 mod markers;
@@ -1088,8 +1089,32 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)
                 .map_err(|e| format!("create app data: {e}"))?;
 
+            // Вшитые карты из {exe}/maps → AppData/maps
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(exe_dir) = exe.parent() {
+                    let _ = local_map::ensure_bundled_maps(exe_dir, &data_dir);
+                }
+            }
+
             let store = SettingsStore::new(data_dir.join("settings.json"));
-            let settings = store.load().unwrap_or_default();
+            let mut settings = store.load().unwrap_or_default();
+            // Если карта ещё не выбрана, но есть вшитый пакет — подставить первый готовый.
+            if settings.local_map_path.trim().is_empty() {
+                if let Ok(packs) = local_map::list_packages(&data_dir) {
+                    if let Some(p) = packs.into_iter().find(|p| p.ready) {
+                        settings.local_map_path = p.path.clone();
+                        settings.local_map_city_id = p.id.clone();
+                        if settings.default_city.trim().is_empty() {
+                            settings.default_city = p.name.clone();
+                            settings.default_lat = p.lat;
+                            settings.default_lon = p.lon;
+                            settings.default_zoom = p.zoom;
+                        }
+                        settings.map_provider = "local".into();
+                        let _ = store.save(&settings);
+                    }
+                }
+            }
             let db = Db::open(data_dir.join("atlas.db"))?;
 
             let state = Arc::new(AppState {
@@ -1147,6 +1172,9 @@ pub fn run() {
             infocard::infocard_get_file,
             infocard::infocard_open_pdf,
             infocard::infocard_list_markers,
+            infocard_offline::infocard_offline_get_meta,
+            infocard_offline::infocard_offline_sync,
+            infocard_offline::infocard_offline_search,
             get_app_version,
             check_for_updates,
             download_and_apply_update

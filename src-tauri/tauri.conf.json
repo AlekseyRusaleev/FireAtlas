@@ -1,13 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Пожарный Атлас",
-  "version": "0.1.21",
+  "version": "0.1.48",
   "identifier": "ru.fireatlas.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
-    "beforeBundleCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File src-tauri/copy-webview2-loader.ps1",
     "frontendDist": "../dist"
   },
   "app": {
@@ -38,12 +37,7 @@
       "icons/128x128-2x.png",
       "icons/icon.png",
       "icons/icon.ico"
-    ],
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser"
-      }
-    }
+    ]
   },
   "plugins": {}
 }

@@ -270,7 +270,13 @@ export interface UpdateManifest {
   version: string;
   notes: string;
   publishedAt: string;
+  /** Артефакт под текущую ОС (бэкенд подставляет Windows ZIP или Linux AppImage). */
   portable: PortableArtifact;
+  /** Поля манифеста с сервера; для UI не используются — бэкенд уже выбрал `portable`. */
+  portableLinux?: PortableArtifact;
+  appimageLinux?: PortableArtifact;
+  installer?: PortableArtifact;
+  installerLinux?: PortableArtifact;
 }
 
 export interface UpdateCheckResult {
@@ -286,6 +292,35 @@ export async function getAppVersion(): Promise<string> {
 export async function checkForUpdates(): Promise<UpdateCheckResult> {
   return invoke("check_for_updates");
 }
+
+export async function infocardOfflineGetMeta(): Promise<InfocardOfflineMeta | null> {
+  return invoke("infocard_offline_get_meta");
+}
+
+export async function infocardOfflineSync(): Promise<InfocardOfflineMeta> {
+  return invoke("infocard_offline_sync");
+}
+
+export async function infocardOfflineSearch(
+  query: string,
+  limit?: number,
+): Promise<InfocardFileHit[]> {
+  return invoke("infocard_offline_search", { query, limit });
+}
+
+export type InfocardOfflineMeta = {
+  saved_at: string;
+  file_count: number;
+  bytes_total: number;
+};
+
+export type InfocardOfflineProgress = {
+  running: boolean;
+  phase: string;
+  done: number;
+  total: number;
+  error?: string;
+};
 
 export async function downloadAndApplyUpdate(url: string, sha256: string): Promise<void> {
   return invoke("download_and_apply_update", { url, sha256 });

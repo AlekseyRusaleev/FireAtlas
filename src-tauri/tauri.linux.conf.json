@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FireAtlas",
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage"],
+    "category": "Utility",
+    "shortDescription": "Пожарный Атлас — поиск ИППВ и информационных карточек",
+    "longDescription": "Настольное offline-first приложение для пунктов связи пожарной охраны: водоисточники (ИППВ), информационные карточки, офлайн-карта OpenStreetMap, адресный поиск и автообновление с сервера.",
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      },
+      "deb": {
+        "desktopTemplate": "linux/fireatlas.desktop",
+        "recommends": ["curl", "xdg-utils"]
+      }
+    }
+  }
+}

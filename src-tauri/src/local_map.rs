@@ -37,6 +37,9 @@ pub struct MapPackageMeta {
     /// Радиус скачивания (км). Старые пакеты могут не иметь поля.
     #[serde(default)]
     pub radius_km: f64,
+    /// 2+ — пакет без заглушек Carto «API KEY REQUIRED».
+    #[serde(default)]
+    pub pack_revision: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,31 +70,25 @@ pub struct MapPackProgress {
 }
 
 pub fn cities() -> Vec<MapCity> {
+    // Сначала пункты дислокации отрядов ФПС Новосибирской области (вшиваются в дистрибутив).
     const RAW: &[(&str, &str, f64, f64, u32, f64)] = &[
+        ("novosibirsk", "Новосибирск", 55.0084, 82.9357, 11, 18.0),
+        ("berdsk", "Бердск", 54.7586, 83.0967, 13, 12.0),
+        ("iskitim", "Искитим", 54.6397, 83.3061, 13, 12.0),
+        ("kuybyshev", "Куйбышев", 55.4475, 78.3219, 13, 14.0),
+        ("krasnoobsk", "Краснообск", 54.9203, 82.9906, 14, 10.0),
+        ("karasuk", "Карасук", 53.7178, 78.0400, 13, 14.0),
+        ("moshkovo", "Мошково", 55.3050, 83.6086, 14, 10.0),
+        // Прочие города (догрузка по сети / ZIP)
         ("kemerovo", "Кемерово", 55.3549, 86.0885, 12, 18.0),
         ("novokuznetsk", "Новокузнецк", 53.7596, 87.1216, 12, 18.0),
         ("tomsk", "Томск", 56.4846, 84.9476, 12, 16.0),
         ("barnaul", "Барнаул", 53.3468, 83.7768, 12, 16.0),
-        ("novosibirsk", "Новосибирск", 55.0084, 82.9357, 11, 22.0),
         ("krasnoyarsk", "Красноярск", 56.0153, 92.8932, 11, 20.0),
         ("moscow", "Москва", 55.7558, 37.6173, 11, 25.0),
         ("spb", "Санкт-Петербург", 59.9343, 30.3351, 11, 22.0),
         ("ekaterinburg", "Екатеринбург", 56.8389, 60.6057, 11, 18.0),
-        ("kazan", "Казань", 55.7961, 49.1064, 12, 16.0),
-        ("nizhny", "Нижний Новгород", 56.2965, 43.9361, 12, 16.0),
-        ("chelyabinsk", "Челябинск", 55.1644, 61.4368, 11, 18.0),
-        ("samara", "Самара", 53.1959, 50.1002, 12, 16.0),
         ("omsk", "Омск", 54.9885, 73.3242, 11, 18.0),
-        ("rostov", "Ростов-на-Дону", 47.2357, 39.7015, 12, 16.0),
-        ("ufa", "Уфа", 54.7388, 55.9721, 12, 16.0),
-        ("voronezh", "Воронеж", 51.6720, 39.1843, 12, 14.0),
-        ("perm", "Пермь", 58.0105, 56.2502, 12, 16.0),
-        ("volgograd", "Волгоград", 48.7080, 44.5133, 12, 16.0),
-        ("krasnodar", "Краснодар", 45.0355, 38.9753, 12, 14.0),
-        ("tyumen", "Тюмень", 57.1522, 65.5272, 12, 14.0),
-        ("irkutsk", "Иркутск", 52.2869, 104.3050, 12, 14.0),
-        ("khabarovsk", "Хабаровск", 48.4827, 135.0838, 12, 14.0),
-        ("vladivostok", "Владивосток", 43.1155, 131.8855, 12, 14.0),
     ];
     RAW.iter()
         .map(|(id, name, lat, lon, zoom, r)| MapCity {
@@ -230,6 +227,99 @@ pub fn resolve_city_query(query: &str, radius_km: Option<f64>) -> Result<MapCity
     })
 }
 
+/// ID пакетов, которые кладутся рядом с EXE в `maps/` при сборке дистрибутива НСО.
+pub const BUNDLED_NSO_IDS: &[&str] = &[
+    "novosibirsk",
+    "berdsk",
+    "iskitim",
+    "kuybyshev",
+    "krasnoobsk",
+    "karasuk",
+    "moshkovo",
+];
+
+fn pack_revision_of(dir: &Path) -> u32 {
+    read_meta(dir).map(|m| m.pack_revision).unwrap_or(0)
+}
+
+fn pack_is_placeholder(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().extension().and_then(|s| s.to_str()) == Some("png"))
+        .and_then(|e| e.metadata().ok().map(|m| m.len()))
+        .map(|n| (1900..=2200).contains(&n))
+        .unwrap_or(false)
+}
+
+fn should_replace_pack(src: &Path, dest: &Path) -> bool {
+    if !dest.join("meta.json").is_file() {
+        return true;
+    }
+    if pack_is_placeholder(dest) && !pack_is_placeholder(src) {
+        return true;
+    }
+    pack_revision_of(src) > pack_revision_of(dest)
+}
+
+/// Скопировать вшитые карты из `{exe_dir}/maps` в AppData/maps.
+/// Перезаписывает пакет, если в AppData лежит заглушка Carto или более старая ревизия.
+pub fn ensure_bundled_maps(exe_dir: &Path, maps_parent: &Path) -> Result<u32, String> {
+    let src_root = exe_dir.join("maps");
+    if !src_root.is_dir() {
+        return Ok(0);
+    }
+    let dest_root = maps_root(maps_parent);
+    fs::create_dir_all(&dest_root).map_err(|e| e.to_string())?;
+    let mut copied = 0u32;
+    for id in BUNDLED_NSO_IDS {
+        let src = src_root.join(id);
+        if !src.join("meta.json").is_file() {
+            continue;
+        }
+        let dest = package_dir(maps_parent, id);
+        if !should_replace_pack(&src, &dest) {
+            refresh_housenumbers(&src, &dest);
+            refresh_omtiles(&src, &dest);
+            continue;
+        }
+        if dest.exists() {
+            let _ = fs::remove_dir_all(&dest);
+        }
+        copy_dir_recursive(&src, &dest)?;
+        copied += 1;
+    }
+    // Дополнительно: любые другие пакеты в exe/maps (догруженные в дистрибутив)
+    if let Ok(rd) = fs::read_dir(&src_root) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_dir() || !path.join("meta.json").is_file() {
+                continue;
+            }
+            let id = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if id.is_empty() || BUNDLED_NSO_IDS.contains(&id.as_str()) {
+                continue;
+            }
+            let dest = package_dir(maps_parent, &id);
+            if !should_replace_pack(&path, &dest) {
+                refresh_housenumbers(&path, &dest);
+                refresh_omtiles(&path, &dest);
+                continue;
+            }
+            if dest.exists() {
+                let _ = fs::remove_dir_all(&dest);
+            }
+            copy_dir_recursive(&path, &dest)?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
 pub fn maps_root(maps_parent: &Path) -> PathBuf {
     maps_parent.join("maps")
 }
@@ -359,6 +449,10 @@ fn download_url_with_agent(agent: &ureq::Agent, url: &str, dest: &Path) -> Resul
             if bytes.len() < 100 {
                 return Err("пустой ответ".into());
             }
+            // Carto без ключа отдаёт PNG «API KEY REQUIRED» (~2049 байт).
+            if (1900..=2200).contains(&bytes.len()) {
+                return Err("заглушка тайлов".into());
+            }
             fs::write(dest, &bytes).map_err(|e| e.to_string())?;
             Ok(())
         }
@@ -371,7 +465,9 @@ fn download_curl_hidden(url: &str, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let mut cmd = std::process::Command::new("curl.exe");
+    // Windows ships `curl.exe`; Linux/macOS provide `curl`.
+    let curl_program = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let mut cmd = std::process::Command::new(curl_program);
     cmd.args([
         "-fsSL",
         "--connect-timeout",
@@ -392,7 +488,7 @@ fn download_curl_hidden(url: &str, dest: &Path) -> Result<(), String> {
     }
     let status = cmd
         .status()
-        .map_err(|e| format!("curl.exe не запустился: {e}"))?;
+        .map_err(|e| format!("{curl_program} не запустился: {e}"))?;
     if !status.success() {
         let _ = fs::remove_file(dest);
         return Err("curl: ошибка загрузки".into());
@@ -471,10 +567,12 @@ pub fn prepare_package(
         Esri,
     }
     let tile_hosts: &[(&str, TileUrlKind)] = &[
-        ("https://basemaps.cartocdn.com/rastertiles/voyager", TileUrlKind::Xyz),
-        ("https://a.basemaps.cartocdn.com/rastertiles/voyager", TileUrlKind::Xyz),
         (
             "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile",
+            TileUrlKind::Esri,
+        ),
+        (
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile",
             TileUrlKind::Esri,
         ),
         ("https://tile.openstreetmap.org", TileUrlKind::Xyz),
@@ -589,7 +687,8 @@ pub fn prepare_package(
         }
 
         let tile_path = dir.join(format!("{z}/{x}/{y}.png"));
-        if tile_path.exists() && tile_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        let existing_len = tile_path.metadata().map(|m| m.len()).unwrap_or(0);
+        if tile_path.exists() && existing_len > 2200 {
             ok += 1;
             consecutive_fail = 0;
             continue;
@@ -640,6 +739,49 @@ pub fn prepare_package(
         }
     }
 
+    let _ = app.emit(
+        "map-pack-progress",
+        MapPackProgress {
+            city_id: city.id.clone(),
+            city_name: city.name.clone(),
+            current: total,
+            total,
+            message: "Номера домов OpenStreetMap…".into(),
+            done: false,
+            error: None,
+        },
+    );
+    match download_omtiles(&dir, south, west, north, east) {
+        Ok(n) => {
+            let _ = app.emit(
+                "map-pack-progress",
+                MapPackProgress {
+                    city_id: city.id.clone(),
+                    city_name: city.name.clone(),
+                    current: total,
+                    total,
+                    message: format!("Тайлы номеров домов: {n}"),
+                    done: false,
+                    error: None,
+                },
+            );
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "map-pack-progress",
+                MapPackProgress {
+                    city_id: city.id.clone(),
+                    city_name: city.name.clone(),
+                    current: total,
+                    total,
+                    message: format!("Номера домов не скачались ({e})"),
+                    done: false,
+                    error: None,
+                },
+            );
+        }
+    }
+
     let meta = MapPackageMeta {
         id: city.id.clone(),
         name: city.name.clone(),
@@ -654,8 +796,9 @@ pub fn prepare_package(
         east,
         tile_count: ok,
         created_at: Local::now().to_rfc3339(),
-        source: "Carto Voyager / Esri / OpenStreetMap raster tiles".into(),
+        source: "Esri / OpenStreetMap raster tiles".into(),
         radius_km: city.radius_km,
+        pack_revision: 2,
     };
     fs::write(
         dir.join("meta.json"),
@@ -794,6 +937,93 @@ pub fn import_package_zip(data_path: &Path, zip_path: &Path) -> Result<MapPackag
             ((meta.north - meta.south) * 111.0 / 2.0).clamp(5.0, 35.0)
         },
     })
+}
+
+fn refresh_omtiles(src: &Path, dest: &Path) {
+    let src_om = src.join("omtiles");
+    if !src_om.is_dir() {
+        return;
+    }
+    let dest_om = dest.join("omtiles");
+    if dest_om.join("14").is_dir() {
+        return;
+    }
+    let _ = copy_dir_recursive(&src_om, &dest_om);
+}
+
+fn refresh_housenumbers(src: &Path, dest: &Path) {
+    let src_hn = src.join("housenumbers.json");
+    if !src_hn.is_file() {
+        return;
+    }
+    let dest_hn = dest.join("housenumbers.json");
+    let src_len = src_hn.metadata().map(|m| m.len()).unwrap_or(0);
+    let dest_len = dest_hn.metadata().map(|m| m.len()).unwrap_or(0);
+    if dest_len == src_len && dest_hn.is_file() {
+        return;
+    }
+    let _ = fs::create_dir_all(dest);
+    let _ = fs::copy(&src_hn, &dest_hn);
+}
+
+fn download_omtiles(
+    dir: &Path,
+    south: f64,
+    west: f64,
+    north: f64,
+    east: f64,
+) -> Result<u32, String> {
+    let agent = http_agent();
+    let tilejson: serde_json::Value = agent
+        .get("https://tiles.openfreemap.org/planet")
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    let template = tilejson
+        .get("tiles")
+        .and_then(|t| t.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "нет шаблона тайлов OpenFreeMap".to_string())?;
+    let z = 14u32;
+    let mut xs = [lon_to_x(west, z), lon_to_x(east, z)];
+    let mut ys = [lat_to_y(north, z), lat_to_y(south, z)];
+    xs.sort();
+    ys.sort();
+    let mut ok = 0u32;
+    for x in xs[0]..=xs[1] {
+        for y in ys[0]..=ys[1] {
+            let dest = dir.join(format!("omtiles/{z}/{x}/{y}.pbf"));
+            if dest.is_file() && dest.metadata().map(|m| m.len()).unwrap_or(0) > 20 {
+                ok += 1;
+                continue;
+            }
+            let url = template
+                .replace("{z}", &z.to_string())
+                .replace("{x}", &x.to_string())
+                .replace("{y}", &y.to_string());
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            match agent.get(&url).call() {
+                Ok(resp) => {
+                    let mut bytes = Vec::new();
+                    if resp.into_reader().read_to_end(&mut bytes).is_ok() && bytes.len() > 20 {
+                        if fs::write(&dest, &bytes).is_ok() {
+                            ok += 1;
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    if ok == 0 {
+        Err("не удалось скачать векторные тайлы номеров".into())
+    } else {
+        Ok(ok)
+    }
 }
 
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {

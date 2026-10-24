@@ -11,6 +11,8 @@ pub struct InfocardSession {
     #[serde(default)]
     pub refresh_token: String,
     pub login: String,
+    #[serde(default)]
+    pub offline_sync_done: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +29,7 @@ pub struct InfocardFileHit {
     pub has_pdf: Option<bool>,
 }
 
-fn session_path(app_data: &PathBuf) -> PathBuf {
+pub(crate) fn session_path(app_data: &PathBuf) -> PathBuf {
     app_data.join("infocard_session.json")
 }
 
@@ -35,7 +37,7 @@ fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|e| e.to_string())
 }
 
-fn load_session(path: &PathBuf) -> InfocardSession {
+pub(crate) fn load_session(path: &PathBuf) -> InfocardSession {
     if !path.exists() {
         return InfocardSession::default();
     }
@@ -45,7 +47,7 @@ fn load_session(path: &PathBuf) -> InfocardSession {
         .unwrap_or_default()
 }
 
-fn save_session(path: &PathBuf, session: &InfocardSession) -> Result<(), String> {
+pub(crate) fn save_session(path: &PathBuf, session: &InfocardSession) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -107,7 +109,7 @@ fn refresh_access(
     save_session(session_file, session)
 }
 
-fn authorized_get(
+pub(crate) fn authorized_get(
     base: &str,
     path_and_query: &str,
     session: &mut InfocardSession,
@@ -139,7 +141,15 @@ pub fn infocard_get_session(
     app: tauri::AppHandle,
 ) -> Result<InfocardSession, String> {
     let dir = app_data_dir(&app)?;
-    Ok(load_session(&session_path(&dir)))
+    let path = session_path(&dir);
+    let mut session = load_session(&path);
+    if !session.offline_sync_done {
+        if crate::infocard_offline::get_sync_meta(&app)?.is_some() {
+            session.offline_sync_done = true;
+            let _ = save_session(&path, &session);
+        }
+    }
+    Ok(session)
 }
 
 #[tauri::command]
@@ -201,14 +211,17 @@ pub fn infocard_login(
     let parsed: LoginResp = resp
         .into_json()
         .map_err(|e| format!("Infocard login JSON: {e}"))?;
-    let session = InfocardSession {
+    let mut session = InfocardSession {
         access_token: parsed.access_token,
         refresh_token: parsed.refresh_token.unwrap_or_default(),
         login: login.clone(),
+        offline_sync_done: false,
     };
 
     let dir = app_data_dir(&app)?;
     save_session(&session_path(&dir), &session)?;
+
+    let _ = fetch_me_and_touch_session(&base, &mut session, &session_path(&dir));
 
     {
         let mut s = state.settings.lock();
@@ -218,6 +231,16 @@ pub fn infocard_login(
     }
 
     Ok(session)
+}
+
+fn fetch_me_and_touch_session(
+    base: &str,
+    session: &mut InfocardSession,
+    session_file: &PathBuf,
+) -> Result<(), String> {
+    let resp = authorized_get(base, "/auth/me", session, session_file)?;
+    let _me: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+    save_session(session_file, session)
 }
 
 #[tauri::command]
@@ -231,17 +254,53 @@ pub fn infocard_search_files(
     let dir = app_data_dir(&app)?;
     let session_file = session_path(&dir);
     let mut session = load_session(&session_file);
+    let lim = limit.unwrap_or(50);
+
     if session.access_token.is_empty() {
+        if session.offline_sync_done {
+            return Ok(crate::infocard_offline::offline_search(&app, &query, lim)?
+                .into_iter()
+                .map(|h| InfocardFileHit {
+                    id: h.id,
+                    name: h.name,
+                    status: h.status,
+                    kind: Some(h.kind.clone()),
+                    folder_id: h.folder_id,
+                    folder_name: h.folder_name,
+                    has_pdf: Some(h.kind == "file"),
+                })
+                .collect());
+        }
         return Err("Не выполнен вход в Infocard".into());
     }
 
-    let lim = limit.unwrap_or(50);
     let path = format!(
         "/search/files?q={}&limit={}",
         urlencoding_lite(&query),
         lim
     );
-    let resp = authorized_get(&base, &path, &mut session, &session_file)?;
+    let resp = match authorized_get(&base, &path, &mut session, &session_file) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Ok(hits) = crate::infocard_offline::offline_search(&app, &query, lim) {
+                if !hits.is_empty() {
+                    return Ok(hits
+                        .into_iter()
+                        .map(|h| InfocardFileHit {
+                            id: h.id,
+                            name: h.name,
+                            status: h.status,
+                            kind: Some(h.kind.clone()),
+                            folder_id: h.folder_id,
+                            folder_name: h.folder_name,
+                            has_pdf: Some(h.kind == "file"),
+                        })
+                        .collect());
+                }
+            }
+            return Err(e);
+        }
+    };
 
     let value: serde_json::Value = resp
         .into_json()
@@ -327,77 +386,100 @@ pub fn infocard_list_folder_files(
     app: tauri::AppHandle,
     folder_id: String,
 ) -> Result<Vec<InfocardFileHit>, String> {
-    let base = api_base(&state);
-    let dir = app_data_dir(&app)?;
-    let session_file = session_path(&dir);
-    let mut session = load_session(&session_file);
-    if session.access_token.is_empty() {
-        return Err("Не выполнен вход в Infocard".into());
-    }
     if folder_id.trim().is_empty() {
         return Err("Нет идентификатора папки Infocard".into());
     }
 
-    let mut out = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let mut path = format!(
-            "/folders/{}/children?type=file&limit=100",
-            urlencoding_lite(folder_id.trim())
-        );
-        if let Some(c) = &cursor {
-            path.push_str(&format!("&cursor={}", urlencoding_lite(c)));
-        }
-        let resp = authorized_get(&base, &path, &mut session, &session_file)?;
-        let value: serde_json::Value = resp
-            .into_json()
-            .map_err(|e| format!("Infocard folder children JSON: {e}"))?;
-        let items = value
-            .get("items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        for item in items {
-            let Some(id) = json_id(&item) else { continue };
-            let name = item
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let status = item
-                .get("status")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let has_pdf = item.get("hasPdf").or_else(|| item.get("has_pdf")).and_then(|v| v.as_bool());
-            out.push(InfocardFileHit {
-                id,
-                name,
-                status,
-                kind: Some("file".into()),
-                folder_id: Some(folder_id.clone()),
-                folder_name: None,
-                has_pdf,
-            });
-        }
-        let has_more = value
-            .get("hasMore")
-            .or_else(|| value.get("has_more"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        cursor = value
-            .get("nextCursor")
-            .or_else(|| value.get("next_cursor"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty());
-        if !has_more || cursor.is_none() {
-            break;
-        }
-        if out.len() > 500 {
-            break;
+    let base = api_base(&state);
+    let dir = app_data_dir(&app)?;
+    let session_file = session_path(&dir);
+    let mut session = load_session(&session_file);
+
+    // Офлайн / нет токена — читаем кэш.
+    if session.access_token.is_empty() || session.offline_sync_done {
+        if let Ok(hits) = crate::infocard_offline::offline_list_folder_files(&app, &folder_id) {
+            if !hits.is_empty() || session.access_token.is_empty() {
+                return Ok(hits);
+            }
+        } else if session.access_token.is_empty() {
+            return crate::infocard_offline::offline_list_folder_files(&app, &folder_id);
         }
     }
-    Ok(out)
+
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    let online = (|| -> Result<Vec<InfocardFileHit>, String> {
+        loop {
+            let mut path = format!(
+                "/folders/{}/children?type=file&limit=100",
+                urlencoding_lite(folder_id.trim())
+            );
+            if let Some(c) = &cursor {
+                path.push_str(&format!("&cursor={}", urlencoding_lite(c)));
+            }
+            let resp = authorized_get(&base, &path, &mut session, &session_file)?;
+            let value: serde_json::Value = resp
+                .into_json()
+                .map_err(|e| format!("Infocard folder children JSON: {e}"))?;
+            let items = value
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            for item in items {
+                let Some(id) = json_id(&item) else { continue };
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let status = item
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let has_pdf = item.get("hasPdf").or_else(|| item.get("has_pdf")).and_then(|v| v.as_bool());
+                out.push(InfocardFileHit {
+                    id,
+                    name,
+                    status,
+                    kind: Some("file".into()),
+                    folder_id: Some(folder_id.clone()),
+                    folder_name: None,
+                    has_pdf,
+                });
+            }
+            let has_more = value
+                .get("hasMore")
+                .or_else(|| value.get("has_more"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            cursor = value
+                .get("nextCursor")
+                .or_else(|| value.get("next_cursor"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+            if !has_more || cursor.is_none() {
+                break;
+            }
+            if out.len() > 500 {
+                break;
+            }
+        }
+        Ok(out.clone())
+    })();
+
+    match online {
+        Ok(hits) => Ok(hits),
+        Err(e) => {
+            if let Ok(hits) = crate::infocard_offline::offline_list_folder_files(&app, &folder_id) {
+                if !hits.is_empty() {
+                    return Ok(hits);
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Метаданные файла — чтобы узнать folderId, если в поиске его не было.
@@ -412,42 +494,48 @@ pub fn infocard_get_file(
     let session_file = session_path(&dir);
     let mut session = load_session(&session_file);
     if session.access_token.is_empty() {
-        return Err("Не выполнен вход в Infocard".into());
+        return crate::infocard_offline::offline_get_file(&app, &file_id)?
+            .ok_or_else(|| "Файл не найден в офлайн-базе".into());
     }
     let path = format!("/files/{}", urlencoding_lite(&file_id));
-    let resp = authorized_get(&base, &path, &mut session, &session_file)?;
-    let item: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| format!("Infocard file JSON: {e}"))?;
-    let id = json_id(&item).unwrap_or(file_id);
-    let name = item
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let status = item
-        .get("status")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let folder_id = item
-        .get("folderId")
-        .or_else(|| item.get("folder_id"))
-        .map(|v| {
-            v.as_str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| v.to_string().trim_matches('"').to_string())
-        })
-        .filter(|s| !s.is_empty());
-    let has_pdf = item.get("hasPdf").or_else(|| item.get("has_pdf")).and_then(|v| v.as_bool());
-    Ok(InfocardFileHit {
-        id,
-        name,
-        status,
-        kind: Some("file".into()),
-        folder_id,
-        folder_name: None,
-        has_pdf,
-    })
+    match authorized_get(&base, &path, &mut session, &session_file) {
+        Ok(resp) => {
+            let item: serde_json::Value = resp
+                .into_json()
+                .map_err(|e| format!("Infocard file JSON: {e}"))?;
+            let id = json_id(&item).unwrap_or(file_id);
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let folder_id = item
+                .get("folderId")
+                .or_else(|| item.get("folder_id"))
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| v.to_string().trim_matches('"').to_string())
+                })
+                .filter(|s| !s.is_empty());
+            let has_pdf = item.get("hasPdf").or_else(|| item.get("has_pdf")).and_then(|v| v.as_bool());
+            Ok(InfocardFileHit {
+                id,
+                name,
+                status,
+                kind: Some("file".into()),
+                folder_id,
+                folder_name: None,
+                has_pdf,
+            })
+        }
+        Err(e) => crate::infocard_offline::offline_get_file(&app, &file_id)?
+            .ok_or(e),
+    }
 }
 
 #[tauri::command]
@@ -461,18 +549,32 @@ pub fn infocard_open_pdf(
     let session_file = session_path(&dir);
     let mut session = load_session(&session_file);
     if session.access_token.is_empty() {
-        return Err("Не выполнен вход в Infocard".into());
+        if session.login.is_empty() || !session.offline_sync_done {
+            return Err("Не выполнен вход в Infocard".into());
+        }
     }
 
-    let cache = dir.join("infocard_pdf_cache");
-    fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
-    let safe_id = file_id.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-    let dest = cache.join(format!("{safe_id}.pdf"));
+    if let Ok(Some(cached)) = crate::infocard_offline::cached_pdf_path(&app, &file_id) {
+        return Ok(cached.to_string_lossy().to_string());
+    }
+
+    if session.access_token.is_empty() {
+        return Err("PDF нет в офлайн-кэше".into());
+    }
 
     let path = format!("/files/{}/pdf", urlencoding_lite(&file_id));
     let resp = authorized_get(&base, &path, &mut session, &session_file)?;
 
     let mut reader = resp.into_reader();
+    let dest = crate::infocard_offline::cached_pdf_path(&app, &file_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            let cache = dir.join("infocard_pdf_cache");
+            let _ = fs::create_dir_all(&cache);
+            let safe_id = file_id.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            cache.join(format!("{safe_id}.pdf"))
+        });
     let mut file = fs::File::create(&dest).map_err(|e| e.to_string())?;
     std::io::copy(&mut reader, &mut file).map_err(|e| e.to_string())?;
     // Путь к кэшу — UI открывает PDF внутри приложения (asset / iframe).
@@ -524,13 +626,30 @@ pub fn infocard_list_markers(
     let session_file = session_path(&dir);
     let mut session = load_session(&session_file);
     if session.access_token.is_empty() {
+        if session.offline_sync_done {
+            if let Some(cached) = crate::infocard_offline::load_cached_markers(&app) {
+                return parse_markers_json(cached);
+            }
+        }
         return Err("Не выполнен вход в Infocard".into());
     }
 
-    let resp = authorized_get(&base, "/markers", &mut session, &session_file)?;
+    let resp = match authorized_get(&base, "/markers", &mut session, &session_file) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(cached) = crate::infocard_offline::load_cached_markers(&app) {
+                return parse_markers_json(cached);
+            }
+            return Err(e);
+        }
+    };
     let value: serde_json::Value = resp
         .into_json()
         .map_err(|e| format!("Infocard markers JSON: {e}"))?;
+    parse_markers_json(value)
+}
+
+fn parse_markers_json(value: serde_json::Value) -> Result<InfocardMarkersState, String> {
     let items = value
         .get("items")
         .and_then(|v| v.as_array())
@@ -613,7 +732,7 @@ pub fn infocard_list_markers(
     })
 }
 
-fn urlencoding_lite(s: &str) -> String {
+pub(crate) fn urlencoding_lite(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {

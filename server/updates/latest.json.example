@@ -1,9 +1,25 @@
 {
-  "version": "0.1.1",
+  "version": "0.1.47",
   "notes": "Кратко, что нового в этой версии.",
-  "publishedAt": "2026-07-31",
+  "publishedAt": "2026-09-15",
   "portable": {
-    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.1-portable.zip",
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.45-portable.zip",
     "sha256": "REPLACE_WITH_SHA256_OF_ZIP"
+  },
+  "installer": {
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-Setup.exe",
+    "sha256": "REPLACE_WITH_SHA256_OF_EXE"
+  },
+  "portableLinux": {
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.45-linux-x86_64",
+    "sha256": "REPLACE_WITH_SHA256_OF_LINUX_BINARY"
+  },
+  "appimageLinux": {
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.45-linux-x86_64.AppImage",
+    "sha256": "REPLACE_WITH_SHA256_OF_APPIMAGE"
+  },
+  "installerLinux": {
+    "url": "https://geo.infocardmchs.ru/updates/FireAtlas-0.1.45-linux-x86_64.deb",
+    "sha256": "REPLACE_WITH_SHA256_OF_DEB"
   }
 }

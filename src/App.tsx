@@ -148,25 +148,17 @@ export default function App() {
             ? `ИППВ: ${stats.water_points} · Карточки: ${stats.cards} · Источники: ${stats.sources}`
             : "Нет данных индекса"}
         </div>
-      </header>
-
-      {error && <div className="status-banner">{error}</div>}
-
-      {updateOffer && !updateDismissed && (
-        <div className="update-banner">
-          <div className="update-banner-text">
-            <strong>Доступна версия {updateOffer.version}</strong>
-            {updateOffer.notes ? <span> — {updateOffer.notes}</span> : null}
-            {updateError ? <div className="error-text">{updateError}</div> : null}
-          </div>
-          <div className="update-banner-actions">
+        {updateOffer && !updateDismissed && (
+          <div className="update-chip" title={updateOffer.notes || undefined}>
+            <strong>{updateOffer.version}</strong>
+            {updateError ? <span className="update-chip-error">{updateError}</span> : null}
             <button
               type="button"
               className="btn primary"
               disabled={updateBusy}
               onClick={() => void applyUpdate()}
             >
-              {updateBusy ? "Загрузка…" : "Обновить"}
+              {updateBusy ? "…" : "Обновить"}
             </button>
             <button
               type="button"
@@ -177,8 +169,10 @@ export default function App() {
               Позже
             </button>
           </div>
-        </div>
-      )}
+        )}
+      </header>
+
+      {error && <div className="status-banner">{error}</div>}
 
       <main className="main">
         {tab === "map" && (

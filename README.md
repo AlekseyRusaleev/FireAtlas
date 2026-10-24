@@ -23,6 +23,37 @@
 
 Интернет нужен для: скачивания пакета карты, адресного поиска, крупной нумерации домов и проверки обновлений. ИППВ, карточки и уже скачанная карта работают offline.
 
+## Linux (ПК)
+
+То же приложение собирается под Linux (Ubuntu 22.04+/Debian 12, WebKitGTK 4.1).
+Готовые сборки и автообновление — в канале `https://geo.infocardmchs.ru/updates/`.
+
+**Рекомендуется portable-бинарник + установщик** — автообновление с сервера
+работает и не требует FUSE:
+
+```bash
+curl -LO https://geo.infocardmchs.ru/updates/FireAtlas-0.1.44-linux-x86_64
+curl -LO https://geo.infocardmchs.ru/updates/install-fireatlas-linux.sh
+chmod +x install-fireatlas-linux.sh FireAtlas-0.1.44-linux-x86_64
+./install-fireatlas-linux.sh
+```
+
+Другие варианты:
+
+- **AppImage** (один файл): `chmod +x FireAtlas-<версия>-linux-x86_64.AppImage && ./FireAtlas-<версия>-linux-x86_64.AppImage`.
+  На Ubuntu 24.04 может понадобиться FUSE: `sudo apt install libfuse2t64`.
+- **.deb**: `sudo apt install ./FireAtlas-<версия>-linux-x86_64.deb`.
+  Автообновление в этом варианте требует root — обновляйтесь новым `.deb`.
+
+Для запуска нужны `libwebkit2gtk-4.1-0` и `libgtk-3-0`:
+`sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0`.
+
+Сборка из исходников на Linux:
+
+```bash
+./scripts/build-linux.sh --deps     # portable-бинарник, .AppImage и .deb → dist-linux/
+```
+
 ## Структура базы на диске
 
 ```
@@ -89,8 +120,11 @@ FireAtlas (клиент)
 
 1. При старте клиент тихо читает `latest.json` и сравнивает `version` с локальной.
 2. Если есть новее — баннер «Обновить» / «Позже» (и то же в «О программе»).
-3. Portable: скачивание ZIP → проверка SHA-256 → helper закрывает текущий процесс, копирует файлы, запускает новый EXE.  
-   (Windows не даёт перезаписать запущенный EXE напрямую.)
+3. Windows: скачивание portable ZIP → проверка SHA-256 → helper закрывает текущий
+   процесс, копирует файлы, запускает новый EXE (Windows не даёт перезаписать
+   запущенный EXE напрямую).
+4. Linux: скачивание AppImage → проверка SHA-256 → helper дожидается выхода
+   процесса, атомарно подменяет файл (`mv`) и запускает новую версию.
 
 Выкладка релиза: см. [`server/updates/README.md`](server/updates/README.md).
 

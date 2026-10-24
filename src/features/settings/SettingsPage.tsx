@@ -142,6 +142,96 @@ function InfocardAuthBlock({
   );
 }
 
+function InfocardOfflineBlock() {
+  const [meta, setMeta] = useState<api.InfocardOfflineMeta | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState("");
+  const [done, setDone] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void api.infocardOfflineGetMeta().then(setMeta).catch(() => setMeta(null));
+    const un = listen<api.InfocardOfflineProgress>("infocard-offline-progress", (ev) => {
+      setPhase(ev.payload.phase);
+      setBusy(ev.payload.running);
+      setDone(ev.payload.done || 0);
+      setTotal(ev.payload.total || 0);
+      if (ev.payload.error) setError(ev.payload.error);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, []);
+
+  async function sync() {
+    setBusy(true);
+    setError(null);
+    setPhase("Подготовка…");
+    setDone(0);
+    setTotal(0);
+    try {
+      const m = await api.infocardOfflineSync();
+      setMeta(m);
+      setPhase("Готово");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
+
+  return (
+    <div className="field">
+      <label>Офлайн-база Infocard</label>
+      <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+        Каталог, PDF и метки для работы без интернета. После первой загрузки вход и поиск доступны офлайн.
+      </div>
+      {meta ? (
+        <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+          {meta.file_count} PDF · обновлено{" "}
+          {new Date(meta.saved_at).toLocaleString("ru-RU")}
+        </div>
+      ) : (
+        <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+          База ещё не скачана
+        </div>
+      )}
+      {busy && (
+        <div style={{ marginBottom: 8 }}>
+          <div className="muted" style={{ fontSize: 13, marginBottom: 4 }}>
+            {phase}
+            {pct != null ? ` — ${pct}% (${done}/${total})` : done > 0 ? ` — ${done}` : ""}
+          </div>
+          <div
+            style={{
+              height: 8,
+              borderRadius: 4,
+              background: "var(--border)",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                height: "100%",
+                width: pct != null ? `${pct}%` : done > 0 ? "35%" : "15%",
+                background: "var(--accent, #c45c4a)",
+                transition: "width 0.2s ease",
+              }}
+            />
+          </div>
+        </div>
+      )}
+      {error && <div className="error-text">{error}</div>}
+      <button type="button" className="btn primary" disabled={busy} onClick={() => void sync()}>
+        {busy ? "Скачивание…" : meta ? "Обновить базу" : "Скачать базу"}
+      </button>
+    </div>
+  );
+}
+
 export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap }: Props) {
   const [form, setForm] = useState<AppSettings>({ ...settings });
   const [cityQuery, setCityQuery] = useState(settings.default_city || "");
@@ -448,6 +538,79 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
     void applyCity(q);
   }
 
+  async function activatePack(p: MapPackageInfo) {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const next = normalize({
+        ...form,
+        map_provider: "local",
+        local_map_path: p.path,
+        local_map_city_id: p.id,
+        default_city: p.name,
+        default_lat: p.lat,
+        default_lon: p.lon,
+        default_zoom: p.zoom || form.default_zoom,
+      });
+      setForm(next);
+      setCityQuery(p.name);
+      setPackCityName(p.name);
+      await api.saveSettings(next);
+      await onSaved(next);
+      setMessage(`Активна карта: ${p.name}`);
+      setMessageOk(true);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+      setMessageOk(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importPackZip() {
+    setBusy(true);
+    setMessage("Импорт ZIP…");
+    setMessageOk(false);
+    try {
+      const info = await api.importMapPackageZip();
+      await refreshPackages();
+      await activatePack(info);
+      setMessage(`Импортирован пакет «${info.name}» (${info.tile_count} тайлов)`);
+      setMessageOk(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/cancel|отмен/i.test(msg)) {
+        setMessage(msg);
+        setMessageOk(false);
+      } else {
+        setMessage(null);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportPackZip() {
+    setBusy(true);
+    setMessage("Экспорт ZIP…");
+    setMessageOk(false);
+    try {
+      const path = await api.exportMapPackageZip(form.local_map_path || undefined);
+      setMessage(`ZIP сохранён: ${path}`);
+      setMessageOk(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/cancel|отмен/i.test(msg)) {
+        setMessage(msg);
+        setMessageOk(false);
+      } else {
+        setMessage(null);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function preparePack() {
     const name = packCityName.trim();
     if (!name) {
@@ -616,6 +779,7 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
               loginHint={form.infocard_login}
               onLoginSaved={(login) => setForm({ ...form, infocard_login: login })}
             />
+            <InfocardOfflineBlock />
           </>
         )}
 
@@ -849,13 +1013,45 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
               Карта ещё не скачана. Введите город и нажмите «Скачать».
             </div>
           )}
-          {packages.length > 0 && (
-            <div className="muted" style={{ marginTop: 8 }}>
-              Уже скачано:{" "}
-              {packages
-                .filter((p) => p.ready)
-                .map((p) => p.name)
-                .join(", ") || "—"}
+          <div className="actions" style={{ marginTop: "0.5rem" }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || packDownloading}
+              onClick={() => void importPackZip()}
+            >
+              Импорт ZIP с флешки…
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || packDownloading || !form.local_map_path}
+              onClick={() => void exportPackZip()}
+            >
+              Экспорт ZIP…
+            </button>
+          </div>
+          {packages.filter((p) => p.ready).length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div className="muted" style={{ fontSize: 13, marginBottom: 6 }}>
+                Установленные карты (вшитые / скачанные / с флешки) — нажмите, чтобы выбрать:
+              </div>
+              <div className="actions" style={{ flexWrap: "wrap", gap: 6 }}>
+                {packages
+                  .filter((p) => p.ready)
+                  .map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={`btn ${form.local_map_path === p.path ? "primary" : ""}`}
+                      disabled={busy}
+                      onClick={() => void activatePack(p)}
+                    >
+                      {p.name}
+                      {p.tile_count ? ` (${p.tile_count})` : ""}
+                    </button>
+                  ))}
+              </div>
             </div>
           )}
         </div>

@@ -34,6 +34,9 @@ tsconfig.tsbuildinfo
 
 dist-app/
 
+# Bundled offline map tiles (built by scripts/build-nso-maps.py, shipped in portable ZIP)
+src-tauri/resources/maps/
+
 # Local build artifacts (do not commit)
 fire-atlas.exe
 WebView2Loader.dll
@@ -41,3 +44,6 @@ WebView2Loader.dll
 *.dll
 !src-tauri/**/*.dll
 
+
+# Linux build artifacts
+dist-linux/

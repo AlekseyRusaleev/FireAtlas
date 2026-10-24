@@ -1,7 +1,7 @@
 {
   "name": "fire-atlas",
   "private": true,
-  "version": "0.1.21",
+  "version": "0.1.48",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -19,6 +19,7 @@
     "dompurify": "^3.4.12",
     "leaflet": "^1.9.4",
     "leaflet.markercluster": "^1.5.3",
+    "maplibre-gl": "^4.7.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-leaflet": "^5.0.0"
