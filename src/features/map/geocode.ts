@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { invoke } from "@tauri-apps/api/core";
+
 export interface GeocodeResult {
   lat: number;
   lon: number;
@@ -272,8 +274,48 @@ function uniqueLabels(items: string[]): AddressSuggestion[] {
   return out;
 }
 
+interface LocalAddressHit {
+  lat: number;
+  lon: number;
+  label: string;
+  street: string;
+  house: string;
+}
+
+/** Точки из локального SQLite (dist-app/addresses, папка базы или каталог программы). */
+async function localAddressCandidates(
+  query: string,
+  bias: GeocodeBias | undefined,
+  radiusKm: number
+): Promise<RankedCandidate[]> {
+  const parsed = parseAddressQuery(query);
+  if (!parsed.streetTokens.length) return [];
+  let rows: LocalAddressHit[] = [];
+  try {
+    rows = await invoke<LocalAddressHit[]>("search_address_pack", {
+      streetTokens: parsed.streetTokens,
+      house: parsed.house,
+      lat: bias?.lat ?? 0,
+      lon: bias?.lon ?? 0,
+      radiusKm,
+      limit: 40,
+    });
+  } catch {
+    return [];
+  }
+  return rows.map((row) => ({
+    lat: row.lat,
+    lon: row.lon,
+    label: row.label,
+    street: row.street,
+    house: row.house,
+    score: 0,
+    km: bias ? distanceKm(bias.lat, bias.lon, row.lat, row.lon) : 0,
+  }));
+}
+
 /**
- * Ищет адрес в радиусе города: свой Nominatim → Яндекс (если есть) → Photon / публичный Nominatim.
+ * Ищет адрес в радиусе города: локальный индекс → свой Nominatim → Яндекс → Photon / публичный Nominatim.
  * Кандидаты ранжируются по улице и номеру дома — не берём «ближайший наугад».
  */
 export async function geocodeAddress(
@@ -300,6 +342,9 @@ export async function geocodeAddress(
   const uniqueQueries = [...new Set(queryVariants)];
   const errors: string[] = [];
   const pool: RankedCandidate[] = [];
+  pool.push(...(await localAddressCandidates(q, bias, radiusKm)));
+  const fromPack = pickBest(pool, parsed, bias, radiusKm);
+  if (fromPack && parsed.house) return fromPack;
 
   for (const candidate of uniqueQueries) {
     try {
@@ -386,6 +431,15 @@ export async function suggestAddresses(
   const biasedQuery =
     city && !q.toLowerCase().includes(city.toLowerCase()) ? `${q}, ${city}` : q;
   const labels: string[] = [];
+  try {
+    const local = await localAddressCandidates(q, bias, bias?.radiusKm ?? DEFAULT_RADIUS_KM);
+    for (const hit of local) labels.push(hit.label);
+    if (local.length && typeof navigator !== "undefined" && navigator.onLine === false) {
+      return uniqueLabels(labels);
+    }
+  } catch {
+    // пакета нет — подсказки с сервера
+  }
 
   try {
     const ymaps = (window as any).ymaps;
