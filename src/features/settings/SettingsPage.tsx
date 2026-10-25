@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as api from "../../shared/api";
+import { PlaceSelect } from "../map/PlaceSelect";
 import {
-  CITIES,
   type AppSettings,
   type IndexStats,
   type MapPackageInfo,
@@ -39,6 +39,8 @@ function normalize(form: AppSettings): AppSettings {
       ? form.markers_mode
       : "local",
     map_radius_km: Math.min(35, Math.max(5, Number(form.map_radius_km) || 16)),
+    address_place_id: form.address_place_id?.trim() || "",
+    address_radius_km: Math.min(1600, Math.max(10, Number(form.address_radius_km) || 50)),
   };
 }
 
@@ -236,8 +238,6 @@ function InfocardOfflineBlock() {
 
 export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap }: Props) {
   const [form, setForm] = useState<AppSettings>({ ...settings });
-  const [cityQuery, setCityQuery] = useState(settings.default_city || "");
-  const [showHints, setShowHints] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [messageOk, setMessageOk] = useState(false);
@@ -274,7 +274,6 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
       local_map_path: settings.local_map_path || "",
       map_radius_km: settings.map_radius_km || 16,
     });
-    setCityQuery(settings.default_city || "");
     if (!packDownloading) {
       setPackRadiusKm(Math.min(35, Math.max(5, Math.round(settings.map_radius_km || 16))));
       if (settings.default_city) {
@@ -329,7 +328,6 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
               default_lon: info.lon,
               default_zoom: info.zoom,
             }));
-            setCityQuery(info.name);
             setPackCityName(info.name);
             if (info.radius_km && info.radius_km > 0) {
               setPackRadiusKm(Math.round(info.radius_km));
@@ -360,12 +358,6 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
     const b = normalize(settings);
     return JSON.stringify(a) !== JSON.stringify(b);
   }, [form, settings]);
-
-  const hints = useMemo(() => {
-    const q = cityQuery.trim().toLowerCase();
-    if (!q) return CITIES.slice(0, 8);
-    return CITIES.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 8);
-  }, [cityQuery]);
 
   async function pickFolder() {
     const path = await api.pickDataFolder();
@@ -486,60 +478,6 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
     }
   }
 
-  async function applyCity(name: string) {
-    const local =
-      CITIES.find((c) => c.name.toLowerCase() === name.toLowerCase()) ??
-      CITIES.find((c) => c.name.toLowerCase().includes(name.trim().toLowerCase()));
-    if (local) {
-      setForm((f) => ({
-        ...f,
-        default_city: local.name,
-        default_lat: local.lat,
-        default_lon: local.lon,
-        default_zoom: local.zoom,
-      }));
-      setCityQuery(local.name);
-      setPackCityName(local.name);
-      setShowHints(false);
-      return;
-    }
-    setBusy(true);
-    setMessage(`Ищем город «${name}»…`);
-    setMessageOk(false);
-    try {
-      const city = await api.resolveCity(name);
-      setForm((f) => ({
-        ...f,
-        default_city: city.name,
-        default_lat: city.lat,
-        default_lon: city.lon,
-        default_zoom: city.zoom,
-      }));
-      setCityQuery(city.name);
-      setPackCityName(city.name);
-      setShowHints(false);
-      setMessage(
-        `Город «${city.name}»: ${city.lat.toFixed(4)}, ${city.lon.toFixed(4)}`
-      );
-      setMessageOk(true);
-    } catch (e) {
-      setForm((f) => ({ ...f, default_city: name }));
-      setCityQuery(name);
-      setPackCityName(name);
-      setShowHints(false);
-      setMessage(e instanceof Error ? e.message : String(e));
-      setMessageOk(false);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function searchCity() {
-    const q = cityQuery.trim();
-    if (!q) return;
-    void applyCity(q);
-  }
-
   async function activatePack(p: MapPackageInfo) {
     setBusy(true);
     setMessage(null);
@@ -555,7 +493,6 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
         default_zoom: p.zoom || form.default_zoom,
       });
       setForm(next);
-      setCityQuery(p.name);
       setPackCityName(p.name);
       await api.saveSettings(next);
       await onSaved(next);
@@ -880,57 +817,25 @@ export function SettingsPage({ settings, stats, onSaved, onReindexed, onOpenMap 
           )}
         </div>
 
-        <div className="field city-field">
-          <label>Город по умолчанию</label>
-          <div className="row">
-            <input
-              value={cityQuery}
-              placeholder="Введите название города"
-              onChange={(e) => {
-                setCityQuery(e.target.value);
-                setShowHints(true);
-              }}
-              onFocus={() => setShowHints(true)}
-              onBlur={() => {
-                window.setTimeout(() => setShowHints(false), 150);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  searchCity();
-                }
-              }}
-            />
-            <button type="button" className="btn primary" onClick={searchCity}>
-              Найти
-            </button>
-          </div>
-          {showHints && hints.length > 0 && (
-            <div className="city-hints">
-              {hints.map((c) => (
-                <button
-                  key={c.name}
-                  type="button"
-                  className="city-hint"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => applyCity(c.name)}
-                >
-                  {c.name}
-                </button>
-              ))}
-            </div>
-          )}
-          {form.default_city ? (
-            <div className="muted">
-              Сейчас: <strong>{form.default_city}</strong> ({form.default_lat.toFixed(4)},{" "}
-              {form.default_lon.toFixed(4)}). Поиск адресов на карте — в радиусе{" "}
-              <strong>50 км</strong> вокруг этого города (отдельно от скачивания тайлов).
-            </div>
-          ) : (
-            <div className="muted">
-              Укажите город для поиска адресов (радиус поиска 50 км).
-            </div>
-          )}
+        <PlaceSelect
+          selectedId={form.address_place_id}
+          selectedName={form.default_city}
+          onPick={(place) => {
+            setForm((f) => ({
+              ...f,
+              default_city: place.name,
+              default_lat: place.lat,
+              default_lon: place.lon,
+              default_zoom: place.kind === "region" ? 6 : 12,
+              address_place_id: place.id,
+              address_radius_km: place.radius_km,
+            }));
+            setPackCityName(place.name);
+          }}
+        />
+        <div className="muted" style={{ marginTop: -8, marginBottom: 12 }}>
+          Список строится из локальных файлов адресов Сибирского федерального округа. После выбора
+          нажмите «Сохранить».
         </div>
 
         <div className="field">

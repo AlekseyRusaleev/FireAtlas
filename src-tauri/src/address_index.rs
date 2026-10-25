@@ -1,12 +1,30 @@
 //! Локальный адресный индекс: SQLite с точками «улица + дом», без Nominatim.
 
 use rusqlite::{params_from_iter, Connection, OpenFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 use std::sync::Arc;
 
 use crate::AppState;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressPlace {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub region: String,
+    pub file: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub radius_km: f64,
+    pub count: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddressCatalog {
+    places: Vec<AddressPlace>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AddressHit {
@@ -69,28 +87,56 @@ fn like_pattern(token: &str) -> String {
     format!("%{escaped}%")
 }
 
+fn resolve_rel(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    if rel.is_empty() || rel.contains("..") {
+        return Err("некорректный путь пакета".into());
+    }
+    let mut path = root.to_path_buf();
+    for part in rel.split(['/', '\\']) {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err("некорректный путь пакета".into());
+        }
+        path.push(part);
+    }
+    Ok(path)
+}
+
+fn load_catalogs(dirs: &[PathBuf]) -> Vec<(PathBuf, Vec<AddressPlace>)> {
+    let mut out = Vec::new();
+    for dir in dirs {
+        let file = dir.join("catalog.json");
+        let Ok(raw) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let Ok(catalog) = serde_json::from_str::<AddressCatalog>(&raw) else {
+            continue;
+        };
+        out.push((dir.clone(), catalog.places));
+    }
+    out.sort_by_key(|(_, places)| std::cmp::Reverse(places.len()));
+    out
+}
+
 fn query_pack(
     path: &Path,
     tokens: &[String],
     house: Option<&str>,
-    south: f64,
-    north: f64,
-    west: f64,
-    east: f64,
+    center_lat: f64,
+    center_lon: f64,
+    bounds: Option<(f64, f64, f64, f64)>,
     limit: u32,
 ) -> Result<Vec<AddressHit>, String> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| e.to_string())?;
-    let mut sql = String::from(
-        "SELECT city, street, house, lat, lon FROM addresses \
-         WHERE lat BETWEEN ?1 AND ?2 AND lon BETWEEN ?3 AND ?4",
-    );
-    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-        Box::new(south),
-        Box::new(north),
-        Box::new(west),
-        Box::new(east),
-    ];
+    let mut sql = String::from("SELECT city, street, house, lat, lon FROM addresses WHERE 1=1");
+    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some((south, north, west, east)) = bounds {
+        sql.push_str(" AND lat BETWEEN ?1 AND ?2 AND lon BETWEEN ?3 AND ?4");
+        values.push(Box::new(south));
+        values.push(Box::new(north));
+        values.push(Box::new(west));
+        values.push(Box::new(east));
+    }
     if let Some(house) = house {
         sql.push_str(&format!(" AND house = ?{}", values.len() + 1));
         values.push(Box::new(house.to_string()));
@@ -102,7 +148,13 @@ fn query_pack(
         ));
         values.push(Box::new(like_pattern(token)));
     }
-    sql.push_str(&format!(" LIMIT {limit}"));
+    let lat_idx = values.len() + 1;
+    let lon_idx = values.len() + 2;
+    values.push(Box::new(center_lat));
+    values.push(Box::new(center_lon));
+    sql.push_str(&format!(
+        " ORDER BY ((lat - ?{lat_idx}) * (lat - ?{lat_idx}) + (lon - ?{lon_idx}) * (lon - ?{lon_idx})) LIMIT {limit}"
+    ));
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
@@ -133,6 +185,16 @@ fn bounds(lat: f64, lon: f64, radius_km: f64) -> (f64, f64, f64, f64) {
 }
 
 #[tauri::command]
+pub fn list_address_places(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<AddressPlace>, String> {
+    let data_path = state.settings.lock().data_path.clone();
+    let catalogs = load_catalogs(&address_dirs(&app, &data_path));
+    Ok(catalogs.into_iter().next().map(|(_, places)| places).unwrap_or_default())
+}
+
+#[tauri::command]
 pub fn search_address_pack(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -141,6 +203,7 @@ pub fn search_address_pack(
     lat: f64,
     lon: f64,
     radius_km: Option<f64>,
+    place_id: Option<String>,
     limit: Option<u32>,
 ) -> Result<Vec<AddressHit>, String> {
     let tokens: Vec<String> = street_tokens
@@ -154,28 +217,62 @@ pub fn search_address_pack(
     let house = house
         .map(|h| h.trim().to_lowercase().replace(' ', "").replace('ё', "е"))
         .filter(|h| !h.is_empty());
-    let radius = radius_km.unwrap_or(50.0).clamp(1.0, 80.0);
-    let (south, north, west, east) = if lat.abs() < 0.01 && lon.abs() < 0.01 {
-        (-90.0, 90.0, -180.0, 180.0)
-    } else {
-        bounds(lat, lon, radius)
-    };
     let data_path = state.settings.lock().data_path.clone();
-    let packs = list_packs(&address_dirs(&app, &data_path));
-    if packs.is_empty() {
-        return Ok(vec![]);
-    }
+    let dirs = address_dirs(&app, &data_path);
     let cap = limit.unwrap_or(40).clamp(1, 80);
+    let place_id = place_id.unwrap_or_default();
+
+    if !place_id.is_empty() {
+        let catalogs = load_catalogs(&dirs);
+        let Some((root, places)) = catalogs.into_iter().next() else {
+            return Ok(vec![]);
+        };
+        let Some(place) = places.into_iter().find(|p| p.id == place_id) else {
+            return Ok(vec![]);
+        };
+        let path = resolve_rel(&root, &place.file)?;
+        if !path.is_file() {
+            return Ok(vec![]);
+        }
+        let center_lat = if lat.abs() < 0.01 { place.lat } else { lat };
+        let center_lon = if lon.abs() < 0.01 { place.lon } else { lon };
+        let bounds = if place.kind == "region" {
+            None
+        } else {
+            let radius = radius_km
+                .unwrap_or(place.radius_km)
+                .clamp(5.0, 160.0);
+            let (south, north, west, east) = bounds(center_lat, center_lon, radius);
+            Some((south, north, west, east))
+        };
+        return query_pack(
+            &path,
+            &tokens,
+            house.as_deref(),
+            center_lat,
+            center_lon,
+            bounds,
+            cap,
+        );
+    }
+
+    let radius = radius_km.unwrap_or(50.0).clamp(1.0, 80.0);
+    let box_bounds = if lat.abs() < 0.01 && lon.abs() < 0.01 {
+        None
+    } else {
+        let (south, north, west, east) = bounds(lat, lon, radius);
+        Some((south, north, west, east))
+    };
+    let packs = list_packs(&dirs);
     let mut hits = Vec::new();
     for pack in packs {
         let mut part = query_pack(
             &pack,
             &tokens,
             house.as_deref(),
-            south,
-            north,
-            west,
-            east,
+            lat,
+            lon,
+            box_bounds,
             cap,
         )?;
         hits.append(&mut part);

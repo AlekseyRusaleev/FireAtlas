@@ -17,6 +17,10 @@ export interface GeocodeBias {
   lon: number;
   /** Радиус поиска в километрах (по умолчанию 50). */
   radiusKm?: number;
+  /** Радиус только для локального sqlite-пакета (субъект СФО может быть шире 50 км). */
+  localRadiusKm?: number;
+  /** id места из addresses/catalog.json */
+  placeId?: string;
   city?: string;
 }
 
@@ -297,7 +301,8 @@ async function localAddressCandidates(
       house: parsed.house,
       lat: bias?.lat ?? 0,
       lon: bias?.lon ?? 0,
-      radiusKm,
+      radiusKm: bias?.localRadiusKm ?? radiusKm,
+      placeId: bias?.placeId || null,
       limit: 40,
     });
   } catch {

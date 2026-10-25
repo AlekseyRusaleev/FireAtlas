@@ -15,6 +15,7 @@ import {
 } from "../../shared/types";
 import { LocalMapView } from "./LocalMapView";
 import type { SearchPin } from "./YandexMapView";
+import { PlaceSelect } from "./PlaceSelect";
 import { PdfViewer } from "../../shared/PdfViewer";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -296,10 +297,19 @@ function NearbySection({
 interface Props {
   settings: AppSettings;
   onOpenCard: (cardId: number) => void;
+  onSettings: (settings: AppSettings) => void;
 }
 
-export function MapPage({ settings, onOpenCard }: Props) {
+export function MapPage({ settings, onOpenCard, onSettings }: Props) {
   const serverWaterMode = (settings.markers_mode || "local") === "server";
+  const addressBias = {
+    lat: settings.default_lat,
+    lon: settings.default_lon,
+    city: settings.default_city,
+    radiusKm: SEARCH_RADIUS_KM,
+    localRadiusKm: settings.address_radius_km || SEARCH_RADIUS_KM,
+    placeId: settings.address_place_id || undefined,
+  };
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
@@ -627,12 +637,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
         const unique = [...new Set(candidates)];
         for (const addr of unique) {
           try {
-            const found = await geocodeAddress(addr, settings.yandex_api_key, {
-              lat: settings.default_lat,
-              lon: settings.default_lon,
-              city: settings.default_city,
-              radiusKm: SEARCH_RADIUS_KM,
-            });
+            const found = await geocodeAddress(addr, settings.yandex_api_key, addressBias);
             moveTo(found.lat, found.lon, ADDRESS_ZOOM);
             setSearchPin(found);
             if (serverWaterMode) {
@@ -723,12 +728,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
     let lastErr = "Адрес карточки не удалось показать на карте";
     for (const addr of unique) {
       try {
-        const found = await geocodeAddress(addr, settings.yandex_api_key, {
-          lat: settings.default_lat,
-          lon: settings.default_lon,
-          city: settings.default_city,
-          radiusKm: SEARCH_RADIUS_KM,
-        });
+        const found = await geocodeAddress(addr, settings.yandex_api_key, addressBias);
         const num = card?.number ? ` №${card.number}` : "";
         setSearchPin({
           ...found,
@@ -759,12 +759,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
       const found = await geocodeAddress(
         normalizeAddressForGeocode(q, settings.default_city),
         settings.yandex_api_key,
-        {
-          lat: settings.default_lat,
-          lon: settings.default_lon,
-          city: settings.default_city,
-          radiusKm: SEARCH_RADIUS_KM,
-        }
+        addressBias
       );
       setSearchPin(found);
       setFocusId(null);
@@ -850,12 +845,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
     }
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      void suggestAddresses(q, {
-        lat: settings.default_lat,
-        lon: settings.default_lon,
-        city: settings.default_city,
-        radiusKm: SEARCH_RADIUS_KM,
-      })
+      void suggestAddresses(q, addressBias)
         .then((items) => {
           if (!cancelled) setSuggestions(items);
         })
@@ -867,7 +857,7 @@ export function MapPage({ settings, onOpenCard }: Props) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query, settings.default_city, settings.default_lat, settings.default_lon]);
+  }, [query, settings.default_city, settings.default_lat, settings.default_lon, settings.address_place_id, settings.address_radius_km]);
 
   function applySuggestion(label: string) {
     setQuery(label);
@@ -1174,11 +1164,30 @@ export function MapPage({ settings, onOpenCard }: Props) {
   return (
     <div className="panel map-layout">
       <aside className="side">
+        <PlaceSelect
+          selectedId={settings.address_place_id}
+          selectedName={settings.default_city}
+          onPick={(place) => {
+            void api.saveSettings({
+              ...settings,
+              default_city: place.name,
+              default_lat: place.lat,
+              default_lon: place.lon,
+              default_zoom: place.kind === "region" ? 6 : 12,
+              address_place_id: place.id,
+              address_radius_km: place.radius_km,
+            }).then(onSettings);
+          }}
+        />
         <div className="city-field">
           <input
             id="global-search"
             className="search-box"
-            placeholder={`Адрес в ${settings.default_city || "городе"} (±${SEARCH_RADIUS_KM} км)…`}
+            placeholder={
+              settings.default_city
+                ? `Адрес в «${settings.default_city}»…`
+                : "Сначала выберите город или область"
+            }
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);

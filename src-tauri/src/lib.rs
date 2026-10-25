@@ -1176,6 +1176,7 @@ pub fn run() {
             infocard_offline::infocard_offline_get_meta,
             infocard_offline::infocard_offline_sync,
             infocard_offline::infocard_offline_search,
+            address_index::list_address_places,
             address_index::search_address_pack,
             get_app_version,
             check_for_updates,

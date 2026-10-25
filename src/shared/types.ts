@@ -24,6 +24,22 @@ export interface AppSettings {
   markers_mode: string;
   /** Радиус скачивания локальной карты, км (5–35) */
   map_radius_km: number;
+  /** id из addresses/catalog.json */
+  address_place_id: string;
+  /** Радиус локального поиска адреса, км */
+  address_radius_km: number;
+}
+
+export interface AddressPlace {
+  id: string;
+  kind: "region" | "city" | string;
+  name: string;
+  region: string;
+  file: string;
+  lat: number;
+  lon: number;
+  radius_km: number;
+  count: number;
 }
 
 export interface IndexStats {

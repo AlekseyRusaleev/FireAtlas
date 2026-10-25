@@ -3,6 +3,7 @@ import type {
   AppSettings,
   Card,
   IndexStats,
+  AddressPlace,
   MapCity,
   MapPackageInfo,
   MarkersState,
@@ -165,6 +166,10 @@ export async function readFileBase64(path: string): Promise<string> {
 
 export async function pickDataFolder(): Promise<string | null> {
   return invoke("pick_data_folder");
+}
+
+export async function listAddressPlaces(): Promise<AddressPlace[]> {
+  return invoke("list_address_places");
 }
 
 export async function listMapCities(): Promise<MapCity[]> {

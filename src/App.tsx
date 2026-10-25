@@ -24,6 +24,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   cards_mode: "local",
   markers_mode: "local",
   map_radius_km: 16,
+  address_place_id: "",
+  address_radius_km: 50,
 };
 
 export default function App() {
@@ -181,6 +183,7 @@ export default function App() {
         {tab === "map" && (
           <MapPage
             settings={settings}
+            onSettings={setSettings}
             onOpenCard={(id) => {
               if (!showCardsTab) return;
               setOpenCardId(id);

@@ -40,6 +40,12 @@ pub struct AppSettings {
     /// Радиус скачивания локальной карты, км (5–35)
     #[serde(default = "default_map_radius_km")]
     pub map_radius_km: f64,
+    /// id места из addresses/catalog.json (город или субъект СФО)
+    #[serde(default)]
+    pub address_place_id: String,
+    /// Радиус локального адресного поиска, км
+    #[serde(default = "default_address_radius_km")]
+    pub address_radius_km: f64,
 }
 
 fn default_infocard_api() -> String {
@@ -56,6 +62,10 @@ fn default_markers_mode() -> String {
 
 fn default_map_radius_km() -> f64 {
     16.0
+}
+
+fn default_address_radius_km() -> f64 {
+    50.0
 }
 
 fn default_provider() -> String {
@@ -93,6 +103,8 @@ impl Default for AppSettings {
             cards_mode: default_cards_mode(),
             markers_mode: default_markers_mode(),
             map_radius_km: default_map_radius_km(),
+            address_place_id: String::new(),
+            address_radius_km: default_address_radius_km(),
         }
     }
 }
